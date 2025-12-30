@@ -1,0 +1,65 @@
+{
+  "name": "Test - Simple HTTP Call",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 9 * * *"
+            }
+          ]
+        }
+      },
+      "name": "Daily at 9am",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "http://127.0.0.1:8000/health"
+      },
+      "name": "Check FastAPI Health",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [450, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const response = $input.item.json;\n\nreturn {\n  status: response.status || 'unknown',\n  database: response.database || 'unknown',\n  timestamp: new Date().toISOString(),\n  message: 'FastAPI is ' + (response.status === 'healthy' ? '✅ HEALTHY' : '❌ UNHEALTHY')\n};"
+      },
+      "name": "Format Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [650, 300]
+    }
+  ],
+  "connections": {
+    "Daily at 9am": {
+      "main": [
+        [
+          {
+            "node": "Check FastAPI Health",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check FastAPI Health": {
+      "main": [
+        [
+          {
+            "node": "Format Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false
+}

@@ -1,0 +1,139 @@
+{
+  "name": "TradeAgent - Premarket Scan (9am EST)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 9 * * 1-5"
+            }
+          ],
+          "timezone": "America/New_York"
+        }
+      },
+      "name": "Schedule: 9:00 AM EST (Mon-Fri)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "http://127.0.0.1:8000/scan/premarket",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "name": "Call FastAPI - Premarket Scan",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [450, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Format scan results for Groq AI\nconst scanData = $input.item.json;\n\nif (scanData.status !== 'success') {\n  throw new Error('Scan failed: ' + (scanData.error || 'Unknown error'));\n}\n\nconst signals = scanData.signals || [];\n\nconst signalSummary = signals.map((s, idx) => {\n  const factors = s.factors || {};\n  return {\n    rank: idx + 1,\n    ticker: s.ticker,\n    score: s.composite_score?.toFixed(3),\n    price: s.price?.toFixed(2),\n    momentum: {\n      return_10d: factors.momentum?.return_10d?.toFixed(2),\n      rsi: factors.momentum?.rsi_14?.toFixed(1),\n      z_score: factors.momentum?.z_score?.toFixed(2)\n    },\n    volatility: {\n      vol_20d: factors.volatility?.volatility_20d?.toFixed(1),\n      atr_pct: factors.volatility?.atr_pct?.toFixed(2),\n      z_score: factors.volatility?.z_score?.toFixed(2)\n    },\n    volume: {\n      ratio: factors.volume?.volume_ratio?.toFixed(2),\n      dollar_vol: factors.volume?.dollar_volume,\n      z_score: factors.volume?.z_score?.toFixed(2)\n    }\n  };\n});\n\nreturn {\n  scan_timestamp: scanData.timestamp,\n  execution_time: scanData.execution_time,\n  stats: scanData.stats,\n  signals: signalSummary\n};"
+      },
+      "name": "Format Data for AI",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [650, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "model",
+              "value": "llama-3.1-70b-versatile"
+            },
+            {
+              "name": "messages",
+              "value": "={{ JSON.stringify([{role: 'system', content: 'You are a quantitative trading analyst. Analyze stock signals objectively. Highlight risks and opportunities. Never guarantee returns. Focus on technical factors and risk management. Keep analysis concise and actionable.'}, {role: 'user', content: `Date: ${new Date().toLocaleDateString('en-US', {timeZone: 'America/New_York'})}\n\nTop 10 stocks from multi-factor technical scan:\n\n${JSON.stringify($json.signals, null, 2)}\n\nProvide:\n1. Market Summary (2-3 sentences on overall signals)\n2. Top 3 Picks Analysis (for each stock):\n   - Ticker and key strengths\n   - Technical factors driving selection\n   - Risk factors (volatility, liquidity)\n3. Watchlist (remaining 7 stocks, 1 line each)\n4. Risk Disclaimer\n\nFormat in clear sections. Be specific about numbers.`}]) }}"
+            },
+            {
+              "name": "temperature",
+              "value": "0.7"
+            },
+            {
+              "name": "max_tokens",
+              "value": "1500"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "name": "Groq AI - Generate Summary",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [850, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const groqResponse = $input.item.json;\nconst aiMessage = groqResponse.choices[0].message.content;\n\nconst scanData = $node[\"Format Data for AI\"].json;\n\nconst emailBody = `\n<html>\n<head>\n<style>\n  body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }\n  .header { background: #1a73e8; color: white; padding: 20px; text-align: center; }\n  .content { padding: 20px; }\n  .stats { display: flex; gap: 20px; margin: 20px 0; }\n  .stat-box { background: #e8f0fe; padding: 15px; border-radius: 5px; flex: 1; }\n  .stat-value { font-size: 24px; font-weight: bold; color: #1a73e8; }\n  .stat-label { font-size: 12px; color: #666; }\n  .table { width: 100%; border-collapse: collapse; margin: 20px 0; }\n  .table th { background: #1a73e8; color: white; padding: 10px; text-align: left; }\n  .table td { padding: 8px; border-bottom: 1px solid #ddd; }\n  .table tr:hover { background: #f5f5f5; }\n  .ai-analysis { white-space: pre-wrap; background: #fff; padding: 20px; border: 1px solid #ddd; border-radius: 5px; }\n  .footer { background: #f5f5f5; padding: 15px; text-align: center; font-size: 12px; color: #666; margin-top: 30px; }\n  .disclaimer { background: #fff3cd; border-left: 4px solid #ffc107; padding: 15px; margin: 20px 0; }\n</style>\n</head>\n<body>\n  <div class=\"header\">\n    <h1>📊 TradeAgent Daily Brief</h1>\n    <p>Pre-Market Technical Scan | ${new Date().toLocaleDateString('en-US', {timeZone: 'America/New_York', weekday: 'long', year: 'numeric', month: 'long', day: 'numeric'})}</p>\n  </div>\n  <div class=\"content\">\n    <div class=\"stats\">\n      <div class=\"stat-box\"><div class=\"stat-value\">${scanData.stats.tickers_loaded}</div><div class=\"stat-label\">Stocks Scanned</div></div>\n      <div class=\"stat-box\"><div class=\"stat-value\">${scanData.stats.passed_filters}</div><div class=\"stat-label\">Passed Filters</div></div>\n      <div class=\"stat-box\"><div class=\"stat-value\">${scanData.stats.top_n}</div><div class=\"stat-label\">Top Signals</div></div>\n      <div class=\"stat-box\"><div class=\"stat-value\">${scanData.execution_time}s</div><div class=\"stat-label\">Execution Time</div></div>\n    </div>\n    <h2>🤖 AI Analysis</h2>\n    <div class=\"ai-analysis\">${aiMessage}</div>\n    <h2>📈 Top 10 Signals</h2>\n    <table class=\"table\">\n      <thead><tr><th>Rank</th><th>Ticker</th><th>Score</th><th>Price</th><th>10d Return</th><th>RSI</th><th>Vol (20d)</th><th>Vol Ratio</th></tr></thead>\n      <tbody>\n        ${scanData.signals.map(s => `<tr><td>${s.rank}</td><td><strong>${s.ticker}</strong></td><td>${s.score}</td><td>$${s.price}</td><td>${s.momentum.return_10d}%</td><td>${s.momentum.rsi}</td><td>${s.volatility.vol_20d}%</td><td>${s.volume.ratio}x</td></tr>`).join('')}\n      </tbody>\n    </table>\n    <div class=\"disclaimer\"><strong>⚠️ Risk Disclaimer:</strong> This is a research tool for educational purposes only. Not financial advice.</div>\n  </div>\n  <div class=\"footer\"><p>TradeAgent v0.1.0 | Powered by FastAPI + n8n + Groq AI</p></div>\n</body>\n</html>`;\n\nreturn {\n  subject: `📊 TradeAgent Daily Brief - ${new Date().toLocaleDateString('en-US', {timeZone: 'America/New_York', month: 'short', day: 'numeric'})}`,\n  body: emailBody,\n  scan_data: scanData\n};"
+      },
+      "name": "Format Email",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1050, 300]
+    },
+    {
+      "parameters": {
+        "fromEmail": "tradeagent@yourdomain.com",
+        "toEmail": "yasser@theasdmom.com,yasseriqbal@yahoo.com",
+        "subject": "={{ $json.subject }}",
+        "emailType": "html",
+        "message": "={{ $json.body }}"
+      },
+      "name": "Send Email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2,
+      "position": [1250, 300]
+    }
+  ],
+  "connections": {
+    "Schedule: 9:00 AM EST (Mon-Fri)": {
+      "main": [
+        [
+          {
+            "node": "Call FastAPI - Premarket Scan",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call FastAPI - Premarket Scan": {
+      "main": [[{ "node": "Format Data for AI", "type": "main", "index": 0 }]]
+    },
+    "Format Data for AI": {
+      "main": [
+        [{ "node": "Groq AI - Generate Summary", "type": "main", "index": 0 }]
+      ]
+    },
+    "Groq AI - Generate Summary": {
+      "main": [[{ "node": "Format Email", "type": "main", "index": 0 }]]
+    },
+    "Format Email": {
+      "main": [[{ "node": "Send Email", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false
+}

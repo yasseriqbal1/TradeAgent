@@ -1,0 +1,172 @@
+{
+  "name": "TradeAgent - Validation Scan (10am EST)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 10 * * 1-5"
+            }
+          ],
+          "timezone": "America/New_York"
+        }
+      },
+      "name": "Schedule: 10:00 AM EST (Mon-Fri)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "http://127.0.0.1:8000/scan/validation",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "name": "Call FastAPI - Validation Scan",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [450, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.notify }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "name": "Check If Changes Detected",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [650, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const validationData = $input.item.json;\n\nif (validationData.status !== 'success') {\n  throw new Error('Validation failed: ' + (validationData.error || 'Unknown error'));\n}\n\nconst changes = validationData.changes || {};\nconst signals = validationData.signals || [];\n\nconst changeSummary = {\n  dropped: changes.dropped || [],\n  added: changes.added || [],\n  score_changes: changes.score_changes || [],\n  price_moves: changes.price_moves || []\n};\n\nconst signalSummary = signals.slice(0, 10).map((s, idx) => {\n  const factors = s.factors || {};\n  return {\n    rank: idx + 1,\n    ticker: s.ticker,\n    score: s.composite_score?.toFixed(3),\n    price: s.price?.toFixed(2),\n    momentum: { return_10d: factors.momentum?.return_10d?.toFixed(2), rsi: factors.momentum?.rsi_14?.toFixed(1) },\n    volatility: { vol_20d: factors.volatility?.volatility_20d?.toFixed(1) },\n    volume: { ratio: factors.volume?.volume_ratio?.toFixed(2) }\n  };\n});\n\nreturn {\n  scan_timestamp: validationData.timestamp,\n  execution_time: validationData.execution_time,\n  stats: validationData.stats,\n  changes: changeSummary,\n  signals: signalSummary,\n  has_changes: validationData.notify\n};"
+      },
+      "name": "Format Validation Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [850, 200]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "model",
+              "value": "llama-3.1-70b-versatile"
+            },
+            {
+              "name": "messages",
+              "value": "={{ JSON.stringify([{role: 'system', content: 'You are a quantitative trading analyst. Provide concise alerts about market changes. Focus on material changes only.'}, {role: 'user', content: `10:00 AM Validation Scan - Changes Detected\n\nDropped: ${JSON.stringify($json.changes.dropped)}\nAdded: ${JSON.stringify($json.changes.added)}\nScore Changes: ${JSON.stringify($json.changes.score_changes)}\nPrice Moves: ${JSON.stringify($json.changes.price_moves)}\n\nProvide:\n1. Quick Summary (2-3 sentences)\n2. Action Items\n3. Risk Alert\n\nBe direct and actionable.`}]) }}"
+            },
+            {
+              "name": "temperature",
+              "value": "0.5"
+            },
+            {
+              "name": "max_tokens",
+              "value": "800"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "name": "Groq AI - Analyze Changes",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1050, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "const groqResponse = $input.item.json;\nconst aiMessage = groqResponse.choices[0].message.content;\nconst validationData = $node[\"Format Validation Data\"].json;\nconst changes = validationData.changes;\n\nconst emailBody = `<html><head><style>body{font-family:Arial,sans-serif;line-height:1.6;color:#333}.header{background:#ea4335;color:white;padding:20px;text-align:center}.content{padding:20px}.alert-box{background:#fff3cd;border-left:4px solid #ffc107;padding:15px;margin:20px 0}.ai-analysis{white-space:pre-wrap;background:#fff;padding:20px;border:1px solid #ddd;border-radius:5px}</style></head><body><div class=\"header\"><h1>⚠️ TradeAgent Alert</h1><p>10:00 AM EST | ${new Date().toLocaleDateString('en-US',{timeZone:'America/New_York'})}</p></div><div class=\"content\"><div class=\"alert-box\"><strong>Changes Detected:</strong> ${changes.dropped.length} dropped, ${changes.added.length} added, ${changes.score_changes.length} score changes, ${changes.price_moves.length} price moves</div><h2>🤖 AI Analysis</h2><div class=\"ai-analysis\">${aiMessage}</div></div></body></html>`;\n\nreturn { subject: `⚠️ TradeAgent Alert - ${new Date().toLocaleDateString('en-US',{timeZone:'America/New_York',month:'short',day:'numeric'})}`, body: emailBody };"
+      },
+      "name": "Format Alert Email",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1250, 200]
+    },
+    {
+      "parameters": {
+        "fromEmail": "tradeagent@yourdomain.com",
+        "toEmail": "yasser@theasdmom.com,yasseriqbal@yahoo.com",
+        "subject": "={{ $json.subject }}",
+        "emailType": "html",
+        "message": "={{ $json.body }}"
+      },
+      "name": "Send Alert Email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2,
+      "position": [1450, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "const validationData = $input.item.json;\nconsole.log('No changes detected');\nreturn { message: 'No changes', timestamp: validationData.timestamp };"
+      },
+      "name": "No Changes - Skip Email",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [850, 400]
+    }
+  ],
+  "connections": {
+    "Schedule: 10:00 AM EST (Mon-Fri)": {
+      "main": [
+        [
+          {
+            "node": "Call FastAPI - Validation Scan",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call FastAPI - Validation Scan": {
+      "main": [
+        [{ "node": "Check If Changes Detected", "type": "main", "index": 0 }]
+      ]
+    },
+    "Check If Changes Detected": {
+      "main": [
+        [{ "node": "Format Validation Data", "type": "main", "index": 0 }],
+        [{ "node": "No Changes - Skip Email", "type": "main", "index": 0 }]
+      ]
+    },
+    "Format Validation Data": {
+      "main": [
+        [{ "node": "Groq AI - Analyze Changes", "type": "main", "index": 0 }]
+      ]
+    },
+    "Groq AI - Analyze Changes": {
+      "main": [[{ "node": "Format Alert Email", "type": "main", "index": 0 }]]
+    },
+    "Format Alert Email": {
+      "main": [[{ "node": "Send Alert Email", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false
+}

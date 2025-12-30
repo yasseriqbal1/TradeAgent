@@ -1,0 +1,127 @@
+{
+  "name": "Test - HTTP with Headers",
+  "nodes": [
+    {
+      "parameters": {
+        "path": "test-headers",
+        "method": "GET"
+      },
+      "name": "Webhook Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "http://127.0.0.1:8000/config"
+      },
+      "name": "Get Config",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [450, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://httpbin.org/post",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "X-Test-Header",
+              "value": "test-value-123"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "test_data",
+              "value": "={{ JSON.stringify($json) }}"
+            },
+            {
+              "name": "timestamp",
+              "value": "={{ new Date().toISOString() }}"
+            }
+          ]
+        }
+      },
+      "name": "Test POST with Headers",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [650, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const httpbinResponse = $input.item.json;\n\nreturn {\n  message: '✅ HTTP request with headers successful',\n  headers_sent: httpbinResponse.headers || {},\n  body_sent: httpbinResponse.json || {},\n  test_passed: true\n};"
+      },
+      "name": "Format Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [850, 300]
+    },
+    {
+      "parameters": {
+        "responseData": "={{ $json }}",
+        "responseCode": 200
+      },
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1050, 300]
+    }
+  ],
+  "connections": {
+    "Webhook Trigger": {
+      "main": [
+        [
+          {
+            "node": "Get Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Config": {
+      "main": [
+        [
+          {
+            "node": "Test POST with Headers",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Test POST with Headers": {
+      "main": [
+        [
+          {
+            "node": "Format Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Result": {
+      "main": [
+        [
+          {
+            "node": "Respond",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false
+}

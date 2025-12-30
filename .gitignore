@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+*.env
+secrets.*
+config/local.*
+
+
+# Environment
+.env
+.env.local
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Data
+data/*.csv
+data/*.parquet
+data/*.pkl
+
+# Logs
+logs/*.log
+
+# Models
+models/*.pkl
+models/*.joblib
+
+# OS
+.DS_Store
+Thumbs.db
+.env
