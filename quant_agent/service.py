@@ -3,13 +3,17 @@
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import JSONResponse
 from typing import Optional, List
-from datetime import datetime
+from datetime import datetime, timedelta
 import sys
 from loguru import logger
 
 from .scanner import scanner
 from .database import db
 from .config import settings, scan_config
+from .backtest_engine import Backtester, BacktestConfig
+from .walk_forward import WalkForwardValidator
+from .performance_metrics import PerformanceMetrics
+from .historical_data import historical_data_manager
 
 # Configure logging
 logger.remove()
@@ -44,7 +48,9 @@ async def root():
             "health": "/health",
             "premarket_scan": "/scan/premarket",
             "validation_scan": "/scan/validation",
-            "scan_history": "/scan/history"
+            "scan_history": "/scan/history",
+            "backtest_run": "/backtest/run",
+            "backtest_validate": "/backtest/validate"
         }
     }
 
@@ -280,6 +286,251 @@ async def get_config():
             "atr_period": scan_config.ATR_PERIOD
         }
     }
+@app.post("/backtest/run")
+async def run_backtest(
+    tickers: List[str] = Query(
+        default=None,
+        description="Tickers to backtest (defaults to current holdings)"
+    ),
+    start_date: str = Query(
+        default=None,
+        description="Start date (YYYY-MM-DD). Defaults to 2 years ago"
+    ),
+    end_date: str = Query(
+        default=None,
+        description="End date (YYYY-MM-DD). Defaults to today"
+    ),
+    initial_capital: float = Query(
+        default=100000.0,
+        description="Initial capital for backtest"
+    ),
+    max_positions: int = Query(
+        default=3,
+        description="Maximum concurrent positions"
+    ),
+    enable_regime_filter: bool = Query(
+        default=True,
+        description="Enable market regime filtering"
+    ),
+    enable_correlation_filter: bool = Query(
+        default=True,
+        description="Enable correlation filtering"
+    ),
+    enable_earnings_filter: bool = Query(
+        default=True,
+        description="Enable earnings calendar filtering"
+    )
+):
+    """
+    Run backtest with specified parameters.
+    
+    Args:
+        tickers: List of tickers to test
+        start_date: Backtest start date
+        end_date: Backtest end date
+        initial_capital: Starting capital
+        max_positions: Max concurrent positions
+        enable_regime_filter: Use market regime filter
+        enable_correlation_filter: Use correlation filter
+        enable_earnings_filter: Use earnings filter
+        
+    Returns:
+        Backtest results with performance metrics
+    """
+    try:
+        logger.info("Starting backtest...")
+        
+        # Use defaults if not specified
+        if tickers is None:
+            tickers = scan_config.STOCK_UNIVERSE
+        
+        if start_date is None:
+            start_date = (datetime.now() - timedelta(days=730)).strftime('%Y-%m-%d')
+        
+        if end_date is None:
+            end_date = datetime.now().strftime('%Y-%m-%d')
+        
+        # Parse dates (handle both string and datetime objects)
+        if isinstance(start_date, str):
+            start_dt = datetime.strptime(start_date, '%Y-%m-%d')
+        else:
+            start_dt = start_date
+            
+        if isinstance(end_date, str):
+            end_dt = datetime.strptime(end_date, '%Y-%m-%d')
+        else:
+            end_dt = end_date
+        
+        # Create config
+        config = BacktestConfig(
+            initial_capital=initial_capital,
+            max_positions=max_positions,
+            enable_regime_filter=enable_regime_filter,
+            enable_correlation_filter=enable_correlation_filter,
+            enable_earnings_filter=enable_earnings_filter
+        )
+        
+        # Create backtester
+        backtester = Backtester(config=config)
+        
+        # Load data
+        data = backtester.load_historical_data(
+            tickers=tickers,
+            start_date=start_dt,
+            end_date=end_dt
+        )
+        
+        # Run simulation
+        backtester.simulate_trades(
+            data=data,
+            start_date=start_dt,
+            end_date=end_dt
+        )
+        
+        # Get results
+        trades = backtester.get_trade_log()
+        equity_curve = backtester.get_equity_curve()
+        
+        # Calculate metrics
+        metrics = PerformanceMetrics.calculate_comprehensive_metrics(
+            trades=trades,
+            equity_curve=equity_curve,
+            initial_capital=initial_capital,
+            start_date=start_dt,
+            end_date=end_dt
+        )
+        
+        # Convert to serializable format
+        trades_list = trades.to_dict('records') if len(trades) > 0 else []
+        equity_list = equity_curve.to_dict('records') if len(equity_curve) > 0 else []
+        
+        return {
+            "status": "success",
+            "backtest_parameters": {
+                "tickers": tickers,
+                "start_date": start_date,
+                "end_date": end_date,
+                "initial_capital": initial_capital,
+                "filters_enabled": {
+                    "regime": enable_regime_filter,
+                    "correlation": enable_correlation_filter,
+                    "earnings": enable_earnings_filter
+                }
+            },
+            "metrics": metrics,
+            "trades": trades_list[:100],  # Limit to 100 trades in response
+            "trade_count": len(trades_list),
+            "equity_curve_sample": equity_list[::10]  # Every 10th point
+        }
+        
+    except Exception as e:
+        logger.error(f"Backtest error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/backtest/validate")
+async def run_walk_forward_validation(
+    tickers: List[str] = Query(
+        default=None,
+        description="Tickers to validate"
+    ),
+    start_date: str = Query(
+        default=None,
+        description="Validation start date (YYYY-MM-DD)"
+    ),
+    end_date: str = Query(
+        default=None,
+        description="Validation end date (YYYY-MM-DD)"
+    ),
+    window_months: int = Query(
+        default=6,
+        description="Size of each testing window in months"
+    ),
+    initial_capital: float = Query(
+        default=100000.0,
+        description="Initial capital"
+    )
+):
+    """
+    Run walk-forward validation to test strategy consistency.
+    
+    Args:
+        tickers: Tickers to validate
+        start_date: Start date
+        end_date: End date
+        window_months: Window size in months
+        initial_capital: Starting capital
+        
+    Returns:
+        Walk-forward validation results
+    """
+    try:
+        logger.info("Starting walk-forward validation...")
+        
+        # Defaults
+        if tickers is None:
+            tickers = scan_config.STOCK_UNIVERSE
+        
+        if start_date is None:
+            start_date = (datetime.now() - timedelta(days=730)).strftime('%Y-%m-%d')
+        
+        if end_date is None:
+            end_date = datetime.now().strftime('%Y-%m-%d')
+        
+        # Parse dates
+        start_dt = datetime.strptime(start_date, '%Y-%m-%d')
+        end_dt = datetime.strptime(end_date, '%Y-%m-%d')
+        
+        # Create validator
+        validator = WalkForwardValidator(window_months=window_months)
+        
+        # Create windows
+        windows = validator.create_windows(start_dt, end_dt)
+        
+        # Load data
+        data = historical_data_manager.download_historical_data(
+            tickers=tickers,
+            start_date=start_dt,
+            end_date=end_dt
+        )
+        
+        aligned_data = historical_data_manager.get_aligned_data(data)
+        
+        # Create config
+        config = BacktestConfig(
+            initial_capital=initial_capital,
+            enable_regime_filter=True,
+            enable_correlation_filter=True,
+            enable_earnings_filter=True
+        )
+        
+        # Run validation
+        results = validator.run_walk_forward_test(
+            data=aligned_data,
+            config=config
+        )
+        
+        # Generate report
+        report = validator.generate_validation_report()
+        
+        return {
+            "status": "success",
+            "validation_parameters": {
+                "tickers": tickers,
+                "start_date": start_date,
+                "end_date": end_date,
+                "window_months": window_months,
+                "total_windows": len(windows)
+            },
+            "results": results,
+            "report": report
+        }
+        
+    except Exception as e:
+        logger.error(f"Walk-forward validation error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 
 
 if __name__ == "__main__":

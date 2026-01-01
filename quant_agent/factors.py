@@ -106,12 +106,15 @@ class FactorCalculator:
                 factors['volume_zscore'] = 0
             
             # OBV trend (On-Balance Volume)
-            obv = ta.obv(close, volume)
-            if obv is not None and not obv.empty and len(obv) >= 11:
-                obv_current = obv.iloc[-1]
-                obv_10d_ago = obv.iloc[-11]
-                factors['obv_trend'] = ((obv_current / obv_10d_ago) - 1) * 100 if obv_10d_ago != 0 else 0
-            else:
+            try:
+                obv = ta.obv(close, volume)
+                if obv is not None and not obv.empty and len(obv) >= 11:
+                    obv_current = obv.iloc[-1]
+                    obv_10d_ago = obv.iloc[-11]
+                    factors['obv_trend'] = ((obv_current / obv_10d_ago) - 1) * 100 if obv_10d_ago != 0 else 0
+                else:
+                    factors['obv_trend'] = 0
+            except Exception:
                 factors['obv_trend'] = 0
         else:
             factors['volume_price_corr'] = 0
@@ -160,30 +163,38 @@ class FactorCalculator:
         factors = {}
         
         # RSI
-        rsi = ta.rsi(df['Close'], length=scan_config.RSI_PERIOD)
-        if rsi is not None and not rsi.empty:
-            factors['rsi_14'] = float(rsi.iloc[-1])
-        else:
+        try:
+            rsi = ta.rsi(df['Close'], length=scan_config.RSI_PERIOD)
+            if rsi is not None and not rsi.empty:
+                factors['rsi_14'] = float(rsi.iloc[-1])
+            else:
+                factors['rsi_14'] = None
+        except Exception:
             factors['rsi_14'] = None
         
         # EMAs
-        ema_fast = ta.ema(df['Close'], length=scan_config.EMA_FAST)
-        ema_slow = ta.ema(df['Close'], length=scan_config.EMA_SLOW)
-        ema_trend = ta.ema(df['Close'], length=scan_config.EMA_TREND)
-        
-        if ema_fast is not None and not ema_fast.empty:
-            factors['ema_9'] = float(ema_fast.iloc[-1])
-        else:
+        try:
+            ema_fast = ta.ema(df['Close'], length=scan_config.EMA_FAST)
+            ema_slow = ta.ema(df['Close'], length=scan_config.EMA_SLOW)
+            ema_trend = ta.ema(df['Close'], length=scan_config.EMA_TREND)
+            
+            if ema_fast is not None and not ema_fast.empty:
+                factors['ema_9'] = float(ema_fast.iloc[-1])
+            else:
+                factors['ema_9'] = None
+                
+            if ema_slow is not None and not ema_slow.empty:
+                factors['ema_21'] = float(ema_slow.iloc[-1])
+            else:
+                factors['ema_21'] = None
+                
+            if ema_trend is not None and not ema_trend.empty:
+                factors['ema_50'] = float(ema_trend.iloc[-1])
+            else:
+                factors['ema_50'] = None
+        except Exception:
             factors['ema_9'] = None
-            
-        if ema_slow is not None and not ema_slow.empty:
-            factors['ema_21'] = float(ema_slow.iloc[-1])
-        else:
             factors['ema_21'] = None
-            
-        if ema_trend is not None and not ema_trend.empty:
-            factors['ema_50'] = float(ema_trend.iloc[-1])
-        else:
             factors['ema_50'] = None
         
         # EMA crossover strength
@@ -193,12 +204,17 @@ class FactorCalculator:
             factors['ema_cross'] = None
         
         # MACD
-        macd = ta.macd(df['Close'], fast=12, slow=26, signal=9)
-        if macd is not None and not macd.empty:
-            factors['macd'] = float(macd['MACD_12_26_9'].iloc[-1])
-            factors['macd_signal'] = float(macd['MACDs_12_26_9'].iloc[-1])
-            factors['macd_hist'] = float(macd['MACDh_12_26_9'].iloc[-1])
-        else:
+        try:
+            macd = ta.macd(df['Close'], fast=12, slow=26, signal=9)
+            if macd is not None and not macd.empty:
+                factors['macd'] = float(macd['MACD_12_26_9'].iloc[-1])
+                factors['macd_signal'] = float(macd['MACDs_12_26_9'].iloc[-1])
+                factors['macd_hist'] = float(macd['MACDh_12_26_9'].iloc[-1])
+            else:
+                factors['macd'] = None
+                factors['macd_signal'] = None
+                factors['macd_hist'] = None
+        except Exception:
             factors['macd'] = None
             factors['macd_signal'] = None
             factors['macd_hist'] = None

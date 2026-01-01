@@ -11,28 +11,48 @@ ENV/
 secrets.*
 config/local.*
 
-
 # Environment
 .env
 .env.local
+.env.backup
+
 # IDE
 .vscode/
 .idea/
 *.swp
 
-# Data
+# Data - Keep CSVs, exclude generated files
 data/*.csv
 data/*.parquet
 data/*.pkl
+historical_data/
+
+# Backtest Results - Generated outputs
+backtest_*.csv
+backtest_*.json
+backtest_*.txt
+combined_historical_data.csv
 
 # Logs
-logs/*.log
+logs/
+
+# Testing
+Testing/
 
 # Models
 models/*.pkl
 models/*.joblib
 
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
 # OS
 .DS_Store
 Thumbs.db
-.env
+
+# Temporary files
+*.tmp
+*.bak
+*~

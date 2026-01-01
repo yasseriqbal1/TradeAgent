@@ -198,6 +198,29 @@ class QuestradeAPI:
             logger.error(f"Symbol search failed for {ticker}: {e}")
             return None
     
+    def get_quotes(self, symbol_ids: List[int]) -> List[Dict]:
+        """
+        Get real-time quotes for multiple symbols.
+        
+        Args:
+            symbol_ids: List of symbol IDs
+        
+        Returns:
+            List of quote dictionaries with price/volume data
+        """
+        try:
+            # Questrade API accepts comma-separated symbol IDs
+            ids_str = ",".join(str(sid) for sid in symbol_ids)
+            data = self._request("/v1/markets/quotes", {"ids": ids_str})
+            quotes = data.get("quotes", [])
+            
+            logger.debug(f"Retrieved {len(quotes)} quotes for {len(symbol_ids)} symbols")
+            return quotes
+            
+        except Exception as e:
+            logger.error(f"Failed to get quotes: {e}")
+            return []
+    
     def get_candles(self, symbol_id: int, start_date: datetime, end_date: datetime) -> pd.DataFrame:
         """
         Get historical OHLC candle data.
@@ -243,8 +266,8 @@ class QuestradeAPI:
                 "volume": "Volume"
             })
             
-            # Parse date and set as index
-            df["Date"] = pd.to_datetime(df["Date"])
+            # Parse date and set as index (force timezone-naive)
+            df["Date"] = pd.to_datetime(df["Date"], utc=True).dt.tz_localize(None)
             df = df.set_index("Date")
             
             # Select only OHLCV columns

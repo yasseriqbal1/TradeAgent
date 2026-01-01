@@ -1,0 +1,50 @@
+trading:
+  mode: paper
+  initial_capital: 100000.0
+  max_positions: 3
+  commission_per_trade: 1.0
+  slippage_pct: 0.05
+risk:
+  max_position_pct: 40.0
+  max_daily_loss_pct: 2.0
+  max_sector_exposure_pct: 60.0
+  max_correlation: 0.7
+  min_buying_power_pct: 20.0
+schedule:
+  premarket_scan: 09:00
+  market_scan: "10:00"
+  timezone: America/New_York
+  enabled: true
+filters:
+  enable_regime_filter: false
+  enable_correlation_filter: false
+  enable_earnings_filter: false
+  min_score_threshold: 30.0
+alerts:
+  email_enabled: false
+  smtp_host: smtp.gmail.com
+  smtp_port: 587
+  smtp_user: ""
+  smtp_password: ""
+  email_to: []
+  discord_enabled: true
+  discord_webhook_url: https://discord.com/api/webhooks/1455707939380793417/eFbKC5JiYXmyAc4UarJiC5tbDCJI5X4kxa0bLU25xTaNLGUo-qhnW7YrXBsvxLQlF_hz
+  slack_enabled: false
+  slack_webhook_url: ""
+  sms_enabled: false
+  twilio_account_sid: ""
+  twilio_auth_token: ""
+  twilio_from_number: ""
+  sms_to: []
+  min_level_email: info
+  min_level_sms: critical
+  min_level_discord: info
+  min_level_slack: info
+  rate_limit_per_hour: 10
+database:
+  enabled: true
+  connection_string: postgresql://localhost/tradeagent
+logging:
+  level: INFO
+  file: logs/trading.log
+  console: true
