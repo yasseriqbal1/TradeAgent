@@ -12,27 +12,36 @@ from datetime import datetime, timedelta
 DATA_DIR = Path(__file__).parent / "historical_data"
 DATA_DIR.mkdir(exist_ok=True)
 
-# Trading Universe (excluding financial stocks)
+# Trading Universe - MUST MATCH test_live_1hour_questrade.py
+# (Expanded 55-Stock Universe - Diversified)
 STOCK_UNIVERSE = [
-    # Technology
-    'AAPL', 'MSFT', 'NVDA', 'AMD', 'GOOG', 'META', 'MU', 'PLTR', 
-    'SNOW', 'CRWD', 'DDOG', 'NET', 'SHOP', 'ADBE', 'CRM', 'ORCL',
-    'AVGO', 'INTC', 'CSCO',
+    # Technology - FAANG + Cloud (13 stocks)
+    'AAPL', 'AMD', 'CRWD', 'DDOG', 'GOOG', 'META', 'MSFT', 
+    'MU', 'NET', 'NVDA', 'PLTR', 'SHOP', 'SNOW',
     
-    # Quantum Computing
-    'IONQ', 'QBTS', 'QUBT', 'RGTI', 'LAES',
+    # Quantum Computing (5 stocks)
+    'IONQ', 'LAES', 'QBTS', 'QUBT', 'RGTI',
     
-    # Healthcare
-    'UNH', 'JNJ', 'LLY', 'ABBV', 'TMO', 'PFE', 'MRK',
+    # Semiconductors (5 stocks)
+    'AVGO', 'QCOM', 'TXN', 'ADI', 'AMAT',
     
-    # Energy
-    'XOM', 'CVX', 'COP', 'SLB',
+    # Cybersecurity + AI Infrastructure (5 stocks)
+    'PANW', 'ZS', 'OKTA', 'MDB', 'S',
     
-    # Industrials
-    'CAT', 'BA', 'UPS', 'GE', 'HON',
+    # Healthcare - Pharma + Biotech (7 stocks)
+    'ABBV', 'JNJ', 'UNH', 'PFE', 'LLY', 'MRNA', 'TMO',
     
-    # Consumer/Retail
-    'TSLA', 'AMZN', 'WMT', 'NKE', 'SBUX', 'DIS', 'HD', 'TGT', 'COST',
+    # Energy (5 stocks)
+    'XOM', 'CVX', 'COP', 'EOG', 'SLB',
+    
+    # Industrials + Aerospace (5 stocks)
+    'BA', 'CAT', 'GE', 'HON', 'RTX',
+    
+    # Consumer Discretionary (7 stocks)
+    'AMZN', 'TSLA', 'HD', 'LOW', 'COST', 'TGT', 'NKE',
+    
+    # Consumer Staples + Entertainment (3 stocks)
+    'WMT', 'DIS', 'SBUX',
 ]
 
 def download_stock(ticker):

@@ -1,0 +1,315 @@
+{
+  "name": "TradeAgent Prod",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 8 * * 1-5"
+            }
+          ]
+        }
+      },
+      "name": "Schedule: Data Refresh (8AM)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [160, -220],
+      "id": "cfc05357-8fd0-4599-8509-2ad4c1470196"
+    },
+    {
+      "parameters": {
+        "command": "powershell.exe -ExecutionPolicy Bypass -File \"C:\\\\Users\\\\training\\\\Documents\\\\Python Projects\\\\TradeAgent\\\\run_download.ps1\""
+      },
+      "name": "Download Stock Data",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [360, -220],
+      "id": "4e5e525a-d494-446c-b5fa-42c594223777"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://discord.com/api/webhooks/1455707939380793417/eFbKC5JiYXmyAc4UarJiC5tbDCJI5X4kxa0bLU25xTaNLGUo-qhnW7YrXBsvxLQlF_hz",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "content",
+              "value": "📥 **Data Refresh Complete**\\n\\nTime: {{ $now.toFormat('h:mm a') }} EST\\nStatus: All stock data updated\\n✅ System ready for trading"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "name": "Discord: Data Ready",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [560, -220],
+      "id": "705331ce-6dc4-4bb5-b3e1-c946665761a4"
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "30 9 * * 1-5"
+            }
+          ]
+        }
+      },
+      "name": "Schedule: Start Trading (9:30AM)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [160, -20],
+      "id": "6fb194de-d173-459c-8784-5fcdd65dfb65"
+    },
+    {
+      "parameters": {
+        "command": "powershell.exe -ExecutionPolicy Bypass -File \"C:\\\\Users\\\\training\\\\Documents\\\\Python Projects\\\\TradeAgent\\\\run_trading.ps1\""
+      },
+      "name": "Start Trading",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [360, -20],
+      "id": "053bd686-75ef-4b62-b5b4-5ad3cf9ee719"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://discord.com/api/webhooks/1455707939380793417/eFbKC5JiYXmyAc4UarJiC5tbDCJI5X4kxa0bLU25xTaNLGUo-qhnW7YrXBsvxLQlF_hz",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "content",
+              "value": "🟢 **Live Trading Started**\\n\\nTime: {{ $now.toFormat('h:mm a') }} EST\\nMode: Paper Trading\\nStocks: 25 momentum leaders\\n\\n⏰ Auto-stop: 4:00 PM EST"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "name": "Discord: Trading Started",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [560, -20],
+      "id": "fcb4ef9d-8e28-463d-9bdf-537da4ba369c"
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 16 * * 1-5"
+            }
+          ]
+        }
+      },
+      "name": "Schedule: Market Close (4PM)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [160, 180],
+      "id": "913e31bc-0777-467a-ae57-ea51e1663dda"
+    },
+    {
+      "parameters": {
+        "command": "powershell.exe -Command \"Get-Content 'C:\\\\Users\\\\training\\\\Documents\\\\Python Projects\\\\TradeAgent\\\\logs\\\\trades_log_*.txt' | Select-Object -Last 100\""
+      },
+      "name": "Read Trade Log",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [360, 180],
+      "id": "396cbf64-24b1-406f-94a1-24fab0e4efeb"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse trade log and generate daily summary\nconst logContent = $input.item.json.stdout || '';\n\n// Extract key metrics from log\nconst equityMatch = logContent.match(/Ending Equity:\\s+\\$([\\d,]+\\.\\d{2})/);\nconst pnlMatch = logContent.match(/Net P\\/L:\\s+\\$([+-]?[\\d,]+\\.\\d{2})/);\nconst returnMatch = logContent.match(/Return:\\s+([+-]?[\\d.]+)%/);\nconst tradesMatch = logContent.match(/TRADES EXECUTED: (\\d+)/);\nconst buysMatch = logContent.match(/Buys: (\\d+)/);\nconst sellsMatch = logContent.match(/Sells: (\\d+)/);\n\nconst endingEquity = equityMatch ? equityMatch[1] : '100,000.00';\nconst netPnl = pnlMatch ? pnlMatch[1] : '+0.00';\nconst returnPct = returnMatch ? returnMatch[1] : '+0.00';\nconst totalTrades = tradesMatch ? tradesMatch[1] : '0';\nconst buys = buysMatch ? buysMatch[1] : '0';\nconst sells = sellsMatch ? sellsMatch[1] : '0';\n\nconst emoji = parseFloat(returnPct) >= 0 ? '🟢' : '🔴';\n\nreturn {\n  summary: `${emoji} **Daily Trading Summary**\\n\\n**Date**: ${new Date().toLocaleDateString('en-US', {timeZone: 'America/New_York'})}\\n**Duration**: 9:30 AM - 4:00 PM EST\\n\\n**Performance**:\\n• Ending Equity: $${endingEquity}\\n• Net P/L: $${netPnl}\\n• Return: ${returnPct}%\\n\\n**Activity**:\\n• Total Trades: ${totalTrades}\\n• Buys: ${buys}\\n• Sells: ${sells}\\n\\n✅ Trading stopped for the day`\n};"
+      },
+      "name": "Generate Daily Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [560, 180],
+      "id": "44fd3dd9-d87a-4f03-a2cf-1f1dde94333f"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://discord.com/api/webhooks/1455707939380793417/eFbKC5JiYXmyAc4UarJiC5tbDCJI5X4kxa0bLU25xTaNLGUo-qhnW7YrXBsvxLQlF_hz",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "content",
+              "value": "={{ $json.summary }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "name": "Discord: Daily Summary",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [760, 180],
+      "id": "fb78da1f-cdf7-41fd-906c-58e86c3c2aca"
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "trade-alerts",
+        "options": {}
+      },
+      "name": "Webhook: Trade Alerts",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [160, 380],
+      "webhookId": "trade-alerts",
+      "id": "d2dd9193-d0fd-4923-8464-e4fb743ad148"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Format trade alert for Discord\nconst trade = $input.item.json.body || $input.item.json;\n\nconst emoji = trade.action === 'BUY' ? '🟢' : '🔴';\nconst action = trade.action;\nconst ticker = trade.ticker;\nconst price = trade.price?.toFixed(2);\nconst shares = trade.shares;\n\nlet message = `${emoji} **${action} ${ticker}**\\n\\n`;\n\nif (action === 'BUY') {\n  message += `Price: $${price}\\nShares: ${shares}\\nCost: $${(price * shares).toFixed(2)}\\nMomentum: ${trade.momentum?.toFixed(4)}`;\n} else {\n  const pnl = trade.pnl?.toFixed(2);\n  const pnlPct = trade.pnl_pct?.toFixed(2);\n  message += `Entry: $${trade.entry_price?.toFixed(2)}\\nExit: $${price}\\nShares: ${shares}\\nP/L: ${pnl >= 0 ? '+' : ''}$${pnl} (${pnlPct}%)\\nReason: ${trade.reason}`;\n}\n\nreturn { message };"
+      },
+      "name": "Format Trade Alert",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [360, 380],
+      "id": "39d120b3-b882-4b9f-952d-9d7704089d59"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://discord.com/api/webhooks/1455707939380793417/eFbKC5JiYXmyAc4UarJiC5tbDCJI5X4kxa0bLU25xTaNLGUo-qhnW7YrXBsvxLQlF_hz",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "content",
+              "value": "={{ $json.message }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "name": "Discord: Trade Alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [560, 380],
+      "id": "55b7aa3a-591e-4496-93e3-03a1982c5628"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Schedule: Data Refresh (8AM)": {
+      "main": [
+        [
+          {
+            "node": "Download Stock Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Download Stock Data": {
+      "main": [
+        [
+          {
+            "node": "Discord: Data Ready",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Schedule: Start Trading (9:30AM)": {
+      "main": [
+        [
+          {
+            "node": "Start Trading",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Start Trading": {
+      "main": [
+        [
+          {
+            "node": "Discord: Trading Started",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Schedule: Market Close (4PM)": {
+      "main": [
+        [
+          {
+            "node": "Read Trade Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Trade Log": {
+      "main": [
+        [
+          {
+            "node": "Generate Daily Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Daily Summary": {
+      "main": [
+        [
+          {
+            "node": "Discord: Daily Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook: Trade Alerts": {
+      "main": [
+        [
+          {
+            "node": "Format Trade Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Trade Alert": {
+      "main": [
+        [
+          {
+            "node": "Discord: Trade Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "c97ffae5-da12-46d9-a3b8-e4310a61bcbf",
+  "meta": {
+    "instanceId": "70e2186228c511678bfb9d11aa374453a8e87a591da6d28e500b50d1690c2ab8"
+  },
+  "id": "6YKgfySbyL73duKO",
+  "tags": []
+}

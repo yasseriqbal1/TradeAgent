@@ -221,6 +221,64 @@ class QuestradeAPI:
             logger.error(f"Failed to get quotes: {e}")
             return []
     
+    def get_accounts(self) -> List[Dict]:
+        """
+        Get list of accounts for the user.
+        
+        Returns:
+            List of account dictionaries with account numbers and types
+        """
+        try:
+            data = self._request("/v1/accounts")
+            accounts = data.get("accounts", [])
+            logger.debug(f"Retrieved {len(accounts)} accounts")
+            return accounts
+        except Exception as e:
+            logger.error(f"Failed to get accounts: {e}")
+            return []
+    
+    def get_balances(self, account_number: str) -> Dict:
+        """
+        Get account balances including cash and buying power.
+        
+        Args:
+            account_number: Account number
+        
+        Returns:
+            Dictionary with balance information:
+            - cash: Total cash balance
+            - marketValue: Current market value of positions
+            - totalEquity: Total account equity
+            - buyingPower: Available buying power
+        """
+        try:
+            data = self._request(f"/v1/accounts/{account_number}/balances")
+            balances = data.get("combinedBalances", [{}])[0]
+            logger.debug(f"Retrieved balances: Cash=${balances.get('cash', 0):.2f}, Equity=${balances.get('totalEquity', 0):.2f}")
+            return balances
+        except Exception as e:
+            logger.error(f"Failed to get balances: {e}")
+            return {}
+    
+    def get_positions(self, account_number: str) -> List[Dict]:
+        """
+        Get current positions in the account.
+        
+        Args:
+            account_number: Account number
+        
+        Returns:
+            List of position dictionaries with symbol, quantity, price info
+        """
+        try:
+            data = self._request(f"/v1/accounts/{account_number}/positions")
+            positions = data.get("positions", [])
+            logger.debug(f"Retrieved {len(positions)} positions")
+            return positions
+        except Exception as e:
+            logger.error(f"Failed to get positions: {e}")
+            return []
+    
     def get_candles(self, symbol_id: int, start_date: datetime, end_date: datetime) -> pd.DataFrame:
         """
         Get historical OHLC candle data.
