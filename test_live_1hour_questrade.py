@@ -33,9 +33,9 @@ BASE_POSITION_SIZE_PCT = 0.25
 COMMISSION = 0.0  # Fractional shares are commission-free on Questrade!
 
 # Risk Controls
-STOP_LOSS_PCT = 0.15
-TAKE_PROFIT_PCT = 0.40
-TRAILING_STOP_PCT = 0.12
+STOP_LOSS_PCT = 0.05  # 5% stop loss (tighter for small account)
+TAKE_PROFIT_PCT = 0.02  # 2% profit target (scalping style - fast exits)
+TRAILING_STOP_PCT = 0.015  # 1.5% trailing stop (very tight to lock quick gains)
 MIN_VOLUME_RATIO = 0.3  # Relaxed for midday trading
 MAX_VOLATILITY = 0.06
 MAX_DRAWDOWN_PCT = 0.20  # 20% max drawdown auto-stop
@@ -311,6 +311,8 @@ daily_start_equity = INITIAL_CAPITAL  # Track for daily loss limiter
 consecutive_losses = 0  # Track losing streak
 total_closed_trades = 0  # For loss tracking
 market_regime_ok = True  # Market condition flag
+max_drawdown_pct = 0.0  # Track worst drawdown during session
+max_drawdown_pct = 0.0  # Track worst drawdown during session
 
 log_message(f"\n⏰ Start Time: {start_time.strftime('%I:%M:%S %p EST')}")
 log_message(f"🎚️ Trading Mode: {trading_mode}")
@@ -380,14 +382,13 @@ try:
     
     log_message(f"   ✅ Balance check passed (>${MIN_ACCOUNT_BALANCE})")
     
-    # PRE-FLIGHT WARNING: Stock affordability with small capital
-    max_affordable_price = capital * MAX_PRICE_PER_SHARE_PCT
-    log_message(f"\n⚠️  CAPITAL CONSTRAINTS:")
+    # PRE-FLIGHT INFO: Capital allocation with fractional shares
+    log_message(f"\n💎 FRACTIONAL SHARES ENABLED:")
     log_message(f"   📊 Total Capital: ${capital:.2f}")
-    log_message(f"   💰 Max Position Size: ${capital / MAX_POSITIONS:.2f} each")
-    log_message(f"   📈 Max Affordable Share Price: ${max_affordable_price:.2f}")
-    log_message(f"   ⚠️  Warning: Only stocks under ${max_affordable_price:.2f} can be traded")
-    log_message(f"   💸 Commission Impact: ${COMMISSION:.2f} per trade = {(COMMISSION / (capital / MAX_POSITIONS)) * 100:.1f}% of position")
+    log_message(f"   💰 Position Size: ${capital / MAX_POSITIONS:.2f} each ({BASE_POSITION_SIZE_PCT:.0%} of capital)")
+    log_message(f"   🎯 Max Positions: {MAX_POSITIONS}")
+    log_message(f"   ✨ Commission: ${COMMISSION:.2f} (FREE for fractional shares!)")
+    log_message(f"   🌟 All {len(TRADING_UNIVERSE)} stocks tradeable regardless of price")
     
 except Exception as e:
     error_msg = f"Failed to fetch account balance: {str(e)}"
@@ -417,14 +418,15 @@ try:
     most_recent_date = max([df.index[-1] for df in historical_data.values()])
     data_age_days = (datetime.now() - most_recent_date).days
     
-    if data_age_days > 1:
+    # Allow up to 4 days to account for weekends (Friday → Monday = 3 days)
+    if data_age_days > 4:
         error_msg = f"Historical data is {data_age_days} days old (last: {most_recent_date.date()})"
         log_message(f"\n🚨 SAFETY CHECK FAILED: {error_msg}")
         log_message("   Run download_historical_data.py to update data before trading")
         send_error_alert("Stale Data Detected", error_msg, critical=True)
         exit(1)
     
-    log_message(f"   ✅ Data freshness check passed (last update: {most_recent_date.date()})")
+    log_message(f"   ✅ Data freshness check passed (last update: {most_recent_date.date()}, {data_age_days} days old)")
 except Exception as e:
     log_message(f"⚠️ Could not verify data freshness: {str(e)}")
 
@@ -442,34 +444,38 @@ if positions:
         shares_str = f"{pos['shares']:.4f}" if pos['shares'] < 1 else f"{pos['shares']:.2f}"
         log_message(f"      {pnl_emoji} {ticker}: {shares_str} shares @ ${pos['entry_price']:.2f} ({pnl_pct:+.1f}%)")
     
-    # POSITION RECONCILIATION: Compare DB vs Broker
-    try:
-        log_message("\n🔍 Reconciling positions with broker...")
-        broker_positions = questrade.get_positions(account_number)
-        broker_tickers = {p['symbol'] for p in broker_positions}
-        db_tickers = set(positions.keys())
-        
-        # Check for discrepancies
-        only_in_db = db_tickers - broker_tickers
-        only_in_broker = broker_tickers - db_tickers
-        
-        if only_in_db or only_in_broker:
-            error_msg = f"POSITION MISMATCH! DB: {db_tickers}, Broker: {broker_tickers}"
-            log_message(f"\n🚨 {error_msg}")
-            if only_in_db:
-                log_message(f"   Only in DB: {only_in_db}")
-            if only_in_broker:
-                log_message(f"   Only in Broker: {only_in_broker}")
-            send_error_alert("Position Reconciliation Failed", error_msg, critical=True)
-            log_message("\n⏸️ Trading paused - manual intervention required")
-            log_message("   Fix positions in database or broker, then restart")
-            exit(1)
-        else:
-            log_message(f"   ✅ Reconciliation passed: {len(positions)} positions match")
-    except Exception as e:
-        error_msg = f"Position reconciliation error: {str(e)}"
-        log_message(f"⚠️ {error_msg}")
-        send_error_alert("Reconciliation Error", error_msg, critical=False)
+    # POSITION RECONCILIATION: Compare DB vs Broker (SKIP in paper trading mode)
+    if PAPER_TRADING:
+        log_message("\n🧪 Paper Trading Mode: Skipping broker reconciliation")
+        log_message("   (Paper positions exist only in database)")
+    else:
+        try:
+            log_message("\n🔍 Reconciling positions with broker...")
+            broker_positions = questrade.get_positions(account_number)
+            broker_tickers = {p['symbol'] for p in broker_positions}
+            db_tickers = set(positions.keys())
+            
+            # Check for discrepancies
+            only_in_db = db_tickers - broker_tickers
+            only_in_broker = broker_tickers - db_tickers
+            
+            if only_in_db or only_in_broker:
+                error_msg = f"POSITION MISMATCH! DB: {db_tickers}, Broker: {broker_tickers}"
+                log_message(f"\n🚨 {error_msg}")
+                if only_in_db:
+                    log_message(f"   Only in DB: {only_in_db}")
+                if only_in_broker:
+                    log_message(f"   Only in Broker: {only_in_broker}")
+                send_error_alert("Position Reconciliation Failed", error_msg, critical=True)
+                log_message("\n⏸️ Trading paused - manual intervention required")
+                log_message("   Fix positions in database or broker, then restart")
+                exit(1)
+            else:
+                log_message(f"   ✅ Reconciliation passed: {len(positions)} positions match")
+        except Exception as e:
+            error_msg = f"Position reconciliation error: {str(e)}"
+            log_message(f"⚠️ {error_msg}")
+            send_error_alert("Reconciliation Error", error_msg, critical=False)
 else:
     log_message("   🆕 No open positions - starting fresh")
 
@@ -969,6 +975,10 @@ try:
         
         drawdown_pct = ((current_equity - starting_equity) / starting_equity) * 100
         
+        # Track maximum drawdown reached
+        if drawdown_pct < max_drawdown_pct:
+            max_drawdown_pct = drawdown_pct
+        
         # DRAWDOWN AUTO-STOP: Check for 20% loss
         if drawdown_pct <= -MAX_DRAWDOWN_PCT * 100:
             error_msg = f"Drawdown limit reached: {drawdown_pct:.2f}% (max: -{MAX_DRAWDOWN_PCT*100:.0f}%)"
@@ -1042,50 +1052,95 @@ log_message(f"   Starting Capital: ${starting_equity:,.2f}")
 log_message(f"   Ending Equity:    ${final_equity:,.2f}")
 log_message(f"   Net P&L:          ${final_equity - starting_equity:+,.2f}")
 log_message(f"   Return:           {((final_equity - starting_equity) / starting_equity * 100):+.2f}%")
+log_message(f"   Max Drawdown:     {max_drawdown_pct:+.2f}%")
+
+# Count starting positions (loaded from DB at startup)
+starting_positions_count = len(load_positions_from_db()) if 'load_positions_from_db' in dir() else 0
 
 if trades:
     log_message(f"\n📋 TRADES EXECUTED: {len(trades)}")
     buys = [t for t in trades if t['action'] == 'BUY']
     sells = [t for t in trades if t['action'] == 'SELL']
     
-    log_message(f"\n   Buys: {len(buys)}")
-    for trade in buys:
-        log_message(f"\n   🟢 BUY {trade['ticker']}")
-        log_message(f"      Time: {trade['time']}")
-        log_message(f"      Price: ${trade['price']:.2f}")
-        log_message(f"      Shares: {trade['shares']}")
-        log_message(f"      Cost: ${trade['cost']:,.2f}")
-        log_message(f"      Momentum: {trade['momentum']:.4f}")
+    log_message(f"   📊 Summary:")
+    log_message(f"      Total Trades:  {len(trades)}")
+    log_message(f"      Buys:          {len(buys)}")
+    log_message(f"      Sells:         {len(sells)}")
+    
+    # Calculate win rate from sells
+    if sells:
+        winning_trades = len([t for t in sells if t['pnl'] > 0])
+        win_rate = (winning_trades / len(sells)) * 100
+        log_message(f"      Win Rate:      {win_rate:.1f}% ({winning_trades}/{len(sells)})")
+        
+        total_pnl = sum([t['pnl'] for t in sells])
+        avg_pnl = total_pnl / len(sells)
+        log_message(f"      Total Realized: ${total_pnl:+,.2f}")
+        log_message(f"      Avg P&L/Trade:  ${avg_pnl:+,.2f}")
+    
+    log_message(f"\n   🟢 BUYS ({len(buys)}):")
+    if buys:
+        for trade in buys:
+            shares_str = f"{trade['shares']:.4f}" if trade['shares'] < 1 else f"{trade['shares']:.2f}"
+            log_message(f"      {trade['time']} - {trade['ticker']}: {shares_str} shares @ ${trade['price']:.2f} = ${trade['cost']:.2f}")
+    else:
+        log_message(f"      None")
     
     if sells:
-        log_message(f"\n   Sells: {len(sells)}")
+        log_message(f"\n   🔴 SELLS ({len(sells)}):")
         for trade in sells:
             emoji = "🟢" if trade['pnl'] > 0 else "🔴"
-            log_message(f"\n   {emoji} SELL {trade['ticker']}")
-            log_message(f"      Time: {trade['time']}")
-            log_message(f"      Entry: ${trade['entry_price']:.2f}")
-            log_message(f"      Exit: ${trade['exit_price']:.2f}")
-            log_message(f"      Shares: {trade['shares']}")
-            log_message(f"      P&L: ${trade['pnl']:,.2f} ({trade['pnl_pct']:+.2f}%)")
-            log_message(f"      Reason: {trade['reason'].replace('_', ' ').title()}")
+            shares_str = f"{trade['shares']:.4f}" if trade['shares'] < 1 else f"{trade['shares']:.2f}"
+            log_message(f"      {emoji} {trade['time']} - {trade['ticker']}: {shares_str} shares @ ${trade['exit_price']:.2f} | P&L: ${trade['pnl']:+,.2f} ({trade['pnl_pct']:+.2f}%) | {trade['reason'].replace('_', ' ').title()}")
 else:
     log_message(f"\n📋 TRADES EXECUTED: 0")
     log_message(f"   ℹ️  No trades triggered during test period")
 
 if positions:
-    log_message(f"\n🔹 OPEN POSITIONS: {len(positions)}")
+    log_message(f"\n🔹 OPEN POSITIONS (EOD): {len(positions)}")
+    total_unrealized = 0
     for ticker, pos in positions.items():
         if ticker in final_prices:
             current_price = final_prices[ticker]
             unrealized_pnl = (current_price - pos['entry_price']) * pos['shares']
             unrealized_pct = ((current_price - pos['entry_price']) / pos['entry_price']) * 100
-            log_message(f"\n   {ticker}:")
-            log_message(f"      Entry:      ${pos['entry_price']:.2f}")
-            log_message(f"      Current:    ${current_price:.2f}")
-            log_message(f"      Shares:     {pos['shares']}")
-            log_message(f"      Unrealized: ${unrealized_pnl:+,.2f} ({unrealized_pct:+.2f}%)")
+            total_unrealized += unrealized_pnl
+            shares_str = f"{pos['shares']:.4f}" if pos['shares'] < 1 else f"{pos['shares']:.2f}"
+            log_message(f"      {ticker}: {shares_str} shares @ ${pos['entry_price']:.2f} → ${current_price:.2f} | Unrealized: ${unrealized_pnl:+,.2f} ({unrealized_pct:+.2f}%)")
+    log_message(f"   Total Unrealized P&L: ${total_unrealized:+,.2f}")
 else:
-    log_message(f"\n🔹 OPEN POSITIONS: 0")
+    log_message(f"\n🔹 OPEN POSITIONS (EOD): 0")
+
+# Day overview
+log_message(f"\n📈 DAY OVERVIEW:")
+log_message(f"   Positions at Open: {starting_positions_count}")
+log_message(f"   New Positions:     {len([t for t in trades if t['action'] == 'BUY']) if trades else 0}")
+log_message(f"   Closed Positions:  {len([t for t in trades if t['action'] == 'SELL']) if trades else 0}")
+log_message(f"   Positions at Close: {len(positions)}")
+
+# Machine-readable summary for n8n/webhook parsing
+buys_count = len([t for t in trades if t['action'] == 'BUY']) if trades else 0
+sells_count = len([t for t in trades if t['action'] == 'SELL']) if trades else 0
+total_trades = len(trades) if trades else 0
+net_pnl = final_equity - starting_equity
+return_pct = ((final_equity - starting_equity) / starting_equity * 100) if starting_equity > 0 else 0
+
+log_message(f"\n{'='*80}")
+log_message("SUMMARY_DATA_START")
+log_message(f"DATE={datetime.now().strftime('%m/%d/%Y')}")
+log_message(f"START_TIME={start_time.strftime('%I:%M %p')}")
+log_message(f"END_TIME={end_time.strftime('%I:%M %p')}")
+log_message(f"STARTING_EQUITY={starting_equity:.2f}")
+log_message(f"ENDING_EQUITY={final_equity:.2f}")
+log_message(f"NET_PNL={net_pnl:+.2f}")
+log_message(f"RETURN_PCT={return_pct:+.2f}")
+log_message(f"TOTAL_TRADES={total_trades}")
+log_message(f"BUYS={buys_count}")
+log_message(f"SELLS={sells_count}")
+log_message(f"OPEN_POSITIONS={len(positions)}")
+log_message(f"MAX_DRAWDOWN={max_drawdown_pct:.2f}")
+log_message("SUMMARY_DATA_END")
+log_message(f"{'='*80}")
 
 print_header("✅ Test Complete!")
 log_message(f"\n📝 Full log saved to: {log_file}\n")
