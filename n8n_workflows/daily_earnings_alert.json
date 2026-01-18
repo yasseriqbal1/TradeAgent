@@ -1,0 +1,115 @@
+{
+  "name": "Daily Earnings Alert",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 9 * * 1-5"
+            }
+          ]
+        }
+      },
+      "name": "Schedule: Daily 9:00 AM",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://financialmodelingprep.com/api/v3/earning_calendar",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "queryAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "from",
+              "value": "={{ $now.format('yyyy-MM-dd') }}"
+            },
+            {
+              "name": "to",
+              "value": "={{ $now.format('yyyy-MM-dd') }}"
+            },
+            {
+              "name": "apikey",
+              "value": "eehB8O4BVH249LivyAfHtwUmE7hHSKO5"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "name": "Get Earnings Today",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Your 55-stock trading universe\nconst myStocks = [\n  'AAPL', 'AMD', 'CRWD', 'DDOG', 'GOOG', 'META', 'MSFT', 'MU', 'NET', 'NVDA', 'PLTR', 'SHOP', 'SNOW',\n  'IONQ', 'QBTS', 'QUBT', 'RGTI', 'ARQQ',\n  'ABNB', 'BA', 'CAT', 'CMG', 'COST', 'DIS', 'HD', 'JNJ', 'KO', 'MCD', 'NKE', 'PEP', 'PG', 'SBUX', 'TGT', 'TSLA', 'UNH', 'V', 'WMT',\n  'CVS', 'ISRG', 'LLY', 'PFE', 'TMO', 'UNH',\n  'CVX', 'XOM',\n  'GE', 'HON',\n  'ADBE', 'NFLX', 'PYPL', 'SQ'\n];\n\nconst earnings = $input.all();\nconst filtered = earnings.filter(e => myStocks.includes(e.json.symbol));\n\nif (filtered.length === 0) {\n  return [{\n    json: {\n      message: \"✅ **NO EARNINGS TODAY**\\n\\nAll 55 stocks available for trading.\"\n    }\n  }];\n}\n\nlet msg = \"⚠️ **EARNINGS TODAY**\\n\\n\";\n\nfiltered.forEach(e => {\n  const time = e.json.time || 'unknown';\n  const eps = e.json.epsEstimated || 'N/A';\n  \n  msg += `🎤 **${e.json.symbol}**\\n`;\n  msg += `   Time: ${time}\\n`;\n  msg += `   EPS Est: ${eps}\\n\\n`;\n});\n\nmsg += `🚫 Bot will BLOCK these ${filtered.length} stocks (±30 min blackout)`;\n\nreturn [{ json: { message: msg } }];\n"
+      },
+      "name": "Filter & Format Alert",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://discord.com/api/webhooks/YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "content",
+              "value": "={{ $json.message }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "name": "Discord: Send Alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [900, 300]
+    }
+  ],
+  "connections": {
+    "Schedule: Daily 9:00 AM": {
+      "main": [
+        [
+          {
+            "node": "Get Earnings Today",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Earnings Today": {
+      "main": [
+        [
+          {
+            "node": "Filter & Format Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter & Format Alert": {
+      "main": [
+        [
+          {
+            "node": "Discord: Send Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {}
+}

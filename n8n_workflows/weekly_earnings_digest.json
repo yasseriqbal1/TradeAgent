@@ -1,0 +1,115 @@
+{
+  "name": "Weekly Earnings Digest",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "45 7 * * 1"
+            }
+          ]
+        }
+      },
+      "name": "Schedule: Monday 7:45 AM",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://financialmodelingprep.com/api/v3/earning_calendar",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "queryAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "from",
+              "value": "={{ $now.format('yyyy-MM-dd') }}"
+            },
+            {
+              "name": "to",
+              "value": "={{ $now.plus({ days: 7 }).format('yyyy-MM-dd') }}"
+            },
+            {
+              "name": "apikey",
+              "value": "eehB8O4BVH249LivyAfHtwUmE7hHSKO5"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "name": "Get Earnings This Week",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Your 55-stock trading universe\nconst myStocks = [\n  'AAPL', 'AMD', 'CRWD', 'DDOG', 'GOOG', 'META', 'MSFT', 'MU', 'NET', 'NVDA', 'PLTR', 'SHOP', 'SNOW',\n  'IONQ', 'QBTS', 'QUBT', 'RGTI', 'ARQQ',\n  'ABNB', 'BA', 'CAT', 'CMG', 'COST', 'DIS', 'HD', 'JNJ', 'KO', 'MCD', 'NKE', 'PEP', 'PG', 'SBUX', 'TGT', 'TSLA', 'UNH', 'V', 'WMT',\n  'CVS', 'ISRG', 'LLY', 'PFE', 'TMO', 'UNH',\n  'CVX', 'XOM',\n  'GE', 'HON',\n  'ADBE', 'NFLX', 'PYPL', 'SQ'\n];\n\nconst earnings = $input.all();\nconst filtered = earnings.filter(e => myStocks.includes(e.json.symbol));\n\nif (filtered.length === 0) {\n  return [{\n    json: {\n      message: \"📅 **TRADING WEEK EARNINGS**\\n\\n✅ None of your 55 stocks have earnings this week.\\n\\nAll stocks available for trading!\"\n    }\n  }];\n}\n\n// Group by date\nconst byDate = {};\nfiltered.forEach(e => {\n  const date = e.json.date;\n  if (!byDate[date]) byDate[date] = [];\n  byDate[date].push(e.json);\n});\n\n// Format message\nlet msg = \"📅 **TRADING WEEK EARNINGS**\\n\\n\";\nconst sortedDates = Object.keys(byDate).sort();\n\nsortedDates.forEach(date => {\n  const d = new Date(date);\n  const dayName = d.toLocaleDateString('en-US', { weekday: 'short' });\n  const dateStr = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });\n  \n  msg += `**${dayName} ${dateStr}:**\\n`;\n  \n  byDate[date].forEach(e => {\n    const time = e.time || 'unknown';\n    msg += `  • ${e.symbol} (${time})\\n`;\n  });\n  \n  msg += \"\\n\";\n});\n\nmsg += `⚠️ **${filtered.length} stocks** will be blocked by bot's earnings blackout.\\n`;\nmsg += `✅ **${myStocks.length - filtered.length} stocks** safe to trade.`;\n\nreturn [{ json: { message: msg } }];\n"
+      },
+      "name": "Filter Your 55 Stocks",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://discord.com/api/webhooks/YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "content",
+              "value": "={{ $json.message }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "name": "Discord: Send Digest",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [900, 300]
+    }
+  ],
+  "connections": {
+    "Schedule: Monday 7:45 AM": {
+      "main": [
+        [
+          {
+            "node": "Get Earnings This Week",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Earnings This Week": {
+      "main": [
+        [
+          {
+            "node": "Filter Your 55 Stocks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter Your 55 Stocks": {
+      "main": [
+        [
+          {
+            "node": "Discord: Send Digest",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {}
+}

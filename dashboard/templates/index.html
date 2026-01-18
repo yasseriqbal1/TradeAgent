@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Trading Dashboard - Live</title>
+
+    <!-- Bootstrap 5 CSS -->
+    <link
+      href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css"
+      rel="stylesheet"
+    />
+
+    <!-- Bootstrap Icons -->
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css"
+    />
+
+    <!-- Custom CSS -->
+    <link
+      rel="stylesheet"
+      href="{{ url_for('static', filename='css/style.css') }}"
+    />
+  </head>
+  <body>
+    <div class="container-fluid">
+      <!-- Header -->
+      <div class="row mt-4 mb-4">
+        <div class="col-12">
+          <div class="d-flex justify-content-between align-items-center">
+            <div>
+              <h1 class="mb-0">
+                <i class="bi bi-graph-up-arrow text-primary"></i> Trading
+                Dashboard
+              </h1>
+              <p class="text-muted mb-0">
+                Real-time monitoring • Paper Trading Mode
+              </p>
+            </div>
+            <div class="text-end">
+              <div class="bot-status" id="botStatus">
+                <span class="status-indicator status-loading"></span>
+                <span class="status-text">Connecting...</span>
+              </div>
+              <small class="text-muted d-block" id="lastUpdate"
+                >Last update: --:--:--</small
+              >
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Key Metrics Row -->
+      <div class="row mb-4">
+        <!-- Total P&L -->
+        <div class="col-md-3 mb-3">
+          <div class="metric-card card-pnl">
+            <div class="metric-label">Today's Net P&L</div>
+            <div class="metric-value" id="netPnl">$0.00</div>
+            <div class="metric-subtitle">
+              <span id="realizedPnl">$0.00</span> realized +
+              <span id="unrealizedPnl">$0.00</span> unrealized
+            </div>
+          </div>
+        </div>
+
+        <!-- Win Rate -->
+        <div class="col-md-3 mb-3">
+          <div class="metric-card">
+            <div class="metric-label">Win Rate</div>
+            <div class="metric-value" id="winRate">0%</div>
+            <div class="metric-subtitle">
+              <span id="wins">0</span> wins / <span id="sells">0</span> sells
+            </div>
+          </div>
+        </div>
+
+        <!-- Current Equity -->
+        <div class="col-md-3 mb-3">
+          <div class="metric-card">
+            <div class="metric-label">Current Equity</div>
+            <div class="metric-value" id="currentEquity">$96.36</div>
+            <div class="metric-subtitle">
+              <span id="openPositions">0</span> open positions
+            </div>
+          </div>
+        </div>
+
+        <!-- Trades Today -->
+        <div class="col-md-3 mb-3">
+          <div class="metric-card">
+            <div class="metric-label">Trades Today</div>
+            <div class="metric-value" id="totalTrades">0</div>
+            <div class="metric-subtitle">
+              <span id="buys">0</span> buys •
+              <span id="sellsCount">0</span> sells
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Live Stock Ticker Banner -->
+      <div class="row mb-4">
+        <div class="col-12">
+          <div class="card shadow-sm ticker-banner">
+            <div class="card-body p-2">
+              <div class="ticker-container">
+                <div class="ticker-label">
+                  <i class="bi bi-graph-up text-primary"></i>
+                  <span>LIVE</span>
+                </div>
+                <div class="ticker-scroll" id="tickerScroll">
+                  <div class="ticker-content" id="tickerContent">
+                    <div class="ticker-item loading">
+                      <span class="ticker-symbol">Loading...</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Main Content Row -->
+      <div class="row">
+        <!-- Open Positions -->
+        <div class="col-lg-7 mb-4">
+          <div class="card shadow-sm">
+            <div class="card-header bg-white">
+              <h5 class="mb-0">
+                <i class="bi bi-briefcase text-primary"></i> Open Positions
+              </h5>
+            </div>
+            <div class="card-body p-0">
+              <div class="table-responsive">
+                <table class="table table-hover mb-0">
+                  <thead class="table-light">
+                    <tr>
+                      <th>Ticker</th>
+                      <th class="text-end">Shares</th>
+                      <th class="text-end">Entry</th>
+                      <th class="text-end">Current</th>
+                      <th class="text-end">P&L</th>
+                      <th class="text-end">%</th>
+                      <th>Hold Time</th>
+                    </tr>
+                  </thead>
+                  <tbody id="positionsTable">
+                    <tr>
+                      <td colspan="7" class="text-center text-muted py-4">
+                        <i class="bi bi-inbox fs-2 d-block mb-2"></i>
+                        No open positions
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Bot Status & Info -->
+        <div class="col-lg-5 mb-4">
+          <div class="card shadow-sm mb-3">
+            <div class="card-header bg-white">
+              <h5 class="mb-0">
+                <i class="bi bi-shield-check text-success"></i> Safety Features
+              </h5>
+            </div>
+            <div class="card-body">
+              <div class="safety-item">
+                <i class="bi bi-check-circle-fill text-success"></i>
+                <span>Position Size Limit: 25% per trade</span>
+              </div>
+              <div class="safety-item">
+                <i class="bi bi-check-circle-fill text-success"></i>
+                <span>Trading Window: 9:35 AM - 3:55 PM EST</span>
+              </div>
+              <div class="safety-item">
+                <i class="bi bi-check-circle-fill text-success"></i>
+                <span>Earnings Blackout: ±30 minutes</span>
+              </div>
+              <div class="safety-item">
+                <i class="bi bi-check-circle-fill text-success"></i>
+                <span>Re-entry Cooldown: 15-20 minutes</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="card shadow-sm">
+            <div class="card-header bg-white">
+              <h5 class="mb-0">
+                <i class="bi bi-clock-history text-primary"></i> Session Info
+              </h5>
+            </div>
+            <div class="card-body">
+              <div class="session-info">
+                <div class="info-row">
+                  <span class="info-label">First Trade:</span>
+                  <span class="info-value" id="firstTrade">--:--</span>
+                </div>
+                <div class="info-row">
+                  <span class="info-label">Last Trade:</span>
+                  <span class="info-value" id="lastTrade">--:--</span>
+                </div>
+                <div class="info-row">
+                  <span class="info-label">Avg P&L/Trade:</span>
+                  <span class="info-value" id="avgPnl">$0.00</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Trade History -->
+      <div class="row">
+        <div class="col-12 mb-4">
+          <div class="card shadow-sm">
+            <div
+              class="card-header bg-white d-flex justify-content-between align-items-center"
+            >
+              <h5 class="mb-0">
+                <i class="bi bi-list-ul text-primary"></i> Today's Trade History
+              </h5>
+              <span class="badge bg-secondary" id="tradeCount">0 trades</span>
+            </div>
+            <div class="card-body p-0">
+              <div class="table-responsive">
+                <table class="table table-hover mb-0">
+                  <thead class="table-light">
+                    <tr>
+                      <th>Time</th>
+                      <th>Ticker</th>
+                      <th>Action</th>
+                      <th class="text-end">Shares</th>
+                      <th class="text-end">Price</th>
+                      <th class="text-end">P&L</th>
+                      <th class="text-end">%</th>
+                      <th>Notes</th>
+                    </tr>
+                  </thead>
+                  <tbody id="tradesTable">
+                    <tr>
+                      <td colspan="8" class="text-center text-muted py-4">
+                        <i class="bi bi-inbox fs-2 d-block mb-2"></i>
+                        No trades yet today
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Footer -->
+      <div class="row mb-4">
+        <div class="col-12 text-center text-muted">
+          <small>
+            Dashboard updates automatically every 15 seconds • Read-only mode •
+            No interference with trading bot
+          </small>
+        </div>
+      </div>
+    </div>
+
+    <!-- Bootstrap JS -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+
+    <!-- Custom JS -->
+    <script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
+  </body>
+</html>

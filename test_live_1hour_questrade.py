@@ -6,8 +6,8 @@ Press Ctrl+C to stop
 """
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
-import time
+from datetime import datetime, timedelta, time
+import time as time_sleep
 import os
 from glob import glob
 from pathlib import Path
@@ -19,6 +19,10 @@ from quant_agent.questrade_loader import QuestradeAPI
 from quant_agent.config_loader import ConfigLoader
 import psycopg2
 from psycopg2.extras import RealDictCursor
+
+# Load environment variables
+load_dotenv()
+ALPHAVANTAGE_API_KEY = os.getenv('ALPHAVANTAGE_API')
 
 # PAPER TRADING SAFETY FLAG
 PAPER_TRADING = True  # Set to False ONLY when ready for live money
@@ -34,13 +38,28 @@ COMMISSION = 0.0  # Fractional shares are commission-free on Questrade!
 
 # Risk Controls
 STOP_LOSS_PCT = 0.05  # 5% stop loss (tighter for small account)
-TAKE_PROFIT_PCT = 0.02  # 2% profit target (scalping style - fast exits)
+TAKE_PROFIT_PCT = 0.02  # 2% profit target for stocks under $150
+HIGH_PRICE_THRESHOLD = 150.0  # Price threshold for dynamic take profit
+HIGH_PRICE_TAKE_PROFIT_PCT = 0.01  # 1% profit target for expensive stocks (>$150)
 TRAILING_STOP_PCT = 0.015  # 1.5% trailing stop (very tight to lock quick gains)
 MIN_VOLUME_RATIO = 0.3  # Relaxed for midday trading
 MAX_VOLATILITY = 0.06
 MAX_DRAWDOWN_PCT = 0.20  # 20% max drawdown auto-stop
 MAX_DAILY_LOSS_PCT = 0.08  # 8% max daily portfolio loss
 MAX_CONSECUTIVE_LOSSES = 3  # Pause after 3 losing trades
+
+# FEATURE #1: Per-Trade Position Size Limit (CRITICAL CAPITAL PRESERVATION)
+# Prevents disaster: Single bad trade destroying >20% of account in one move
+# Example: Without this, a 15% gap down could wipe out 3%+ of portfolio
+MAX_POSITION_SIZE_PCT = 0.20  # HARD CAP: Never exceed 20% of capital per trade
+SMALL_ACCOUNT_THRESHOLD = 250.0  # Below $250, allow BASE_POSITION_SIZE_PCT flexibility
+
+# Re-entry Controls (AGGRESSIVE MODE - Jan 18-20 monitoring period)
+COOLDOWN_MINUTES = 8  # Reduced from 15 for more opportunities
+COOLDOWN_AFTER_LOSS_MINUTES = 12  # Reduced from 20 - faster recovery attempts
+MIN_PRICE_CHANGE_PCT = 0.007  # 0.7% (reduced from 1%) - catch smaller moves
+MIN_MOMENTUM_REENTRY = 0.25  # Reduced from 0.35 - accept moderate signals
+MAX_DAILY_REENTRIES = 2  # Maximum times to re-enter same stock per day
 
 # Capital Constraints (for small accounts)
 MIN_ACCOUNT_BALANCE = 80.0  # Refuse to trade below this (USD)
@@ -59,6 +78,16 @@ SPY_MA_PERIOD = 200  # SPY 200-day moving average
 CHECK_INTERVAL_SECONDS = 10  # Check every 10 seconds (6x per minute)
 RUN_CONTINUOUS = True  # Set to False for timed tests
 REMOTE_STOP_FILE = "logs/STOP_TRADING.txt"  # Create this file to stop trading gracefully
+
+# FEATURE #2: Time-of-Day Trading Window (avoid chaotic open/close)
+# First 5 min: fake breakouts, wide spreads, stop hunts
+# Last 5 min: erratic MOC orders, poor execution
+TRADING_START_TIME = (9, 35)  # Start at 9:35 AM EST (5 min buffer after open)
+TRADING_END_TIME = (15, 55)   # Stop new entries at 3:55 PM EST (5 min before close)
+
+# FEATURE #3: Earnings Blackout Window
+# Prevents disaster: Gap moves that ignore stop losses
+EARNINGS_BLACKOUT_MINUTES = 30  # Block trades ±30 minutes around earnings
 
 # n8n Webhook Configuration
 N8N_WEBHOOK_ENABLED = True
@@ -281,6 +310,7 @@ def load_positions_from_db():
                     'shares': row['quantity'],
                     'entry_price': float(row['entry_price']),
                     'entry_date': row['entry_date'],
+                    'entry_time': row['entry_date'],  # Use entry_date for hold duration calculation
                     'current_price': float(row['current_price']),
                     'stop_loss': float(row['stop_loss']),
                     'take_profit': float(row['take_profit']),
@@ -299,10 +329,71 @@ def load_positions_from_db():
         conn.close()
         return {}
 
+def log_trade_to_db(ticker, action, shares, price, capital_before, total_positions, 
+                    exit_reason=None, entry_price=None, hold_minutes=None, pnl=None, pnl_pct=None, notes=None):
+    """Log every trade (buy/sell) to trades_history table"""
+    conn = get_db_connection()
+    if not conn:
+        return False
+    
+    try:
+        total_value = shares * price
+        capital_after = capital_before - total_value if action == 'BUY' else capital_before + total_value
+        
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO trades_history 
+                (ticker, action, shares, price, total_value, 
+                 exit_reason, entry_price, hold_duration_minutes, pnl, pnl_pct,
+                 capital_before, capital_after, total_positions, notes)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """, (
+                ticker, action, shares, price, total_value,
+                exit_reason, entry_price, hold_minutes, pnl, pnl_pct,
+                capital_before, capital_after, total_positions, notes
+            ))
+            conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        log_message(f"   ⚠️ Failed to log trade to history: {str(e)[:100]}", False)
+        if conn:
+            conn.close()
+        return False
+
 # Trading mode indicator
 trading_mode = "🧪 PAPER TRADING MODE" if PAPER_TRADING else "💰 LIVE TRADING MODE"
 
 print_header(f"🔴 LIVE TRADING - QUESTRADE - {trading_mode}")
+
+# PRE-FLIGHT CHECK #1: Weekend Check
+today = datetime.now()
+if today.weekday() >= 5:  # Saturday = 5, Sunday = 6
+    weekday_name = "Saturday" if today.weekday() == 5 else "Sunday"
+    log_message(f"\n🚫 WEEKEND DETECTED: Today is {weekday_name}")
+    log_message("   Markets are closed on weekends")
+    log_message("   Next trading day: Monday 9:30 AM EST\n")
+    exit(0)
+
+# PRE-FLIGHT CHECK #2: Trading Hours (9:30 AM - 4:00 PM EST)
+current_hour = today.hour
+current_minute = today.minute
+market_open_hour = 9
+market_open_minute = 30
+market_close_hour = 16
+
+if current_hour < market_open_hour or (current_hour == market_open_hour and current_minute < market_open_minute):
+    log_message(f"\n⏰ MARKET NOT YET OPEN")
+    log_message(f"   Current time: {today.strftime('%I:%M %p EST')}")
+    log_message(f"   Market opens at: 9:30 AM EST")
+    log_message(f"   Please start the script after market open\n")
+    exit(0)
+elif current_hour >= market_close_hour:
+    log_message(f"\n🔴 MARKET ALREADY CLOSED")
+    log_message(f"   Current time: {today.strftime('%I:%M %p EST')}")
+    log_message(f"   Market closed at: 4:00 PM EST")
+    log_message(f"   Next trading day: Tomorrow 9:30 AM EST\n")
+    exit(0)
 
 # Initialize
 start_time = datetime.now()
@@ -312,7 +403,19 @@ consecutive_losses = 0  # Track losing streak
 total_closed_trades = 0  # For loss tracking
 market_regime_ok = True  # Market condition flag
 max_drawdown_pct = 0.0  # Track worst drawdown during session
-max_drawdown_pct = 0.0  # Track worst drawdown during session
+
+# Re-entry control tracking
+last_sell_times = {}  # {ticker: datetime} - when we last sold this stock
+last_sell_prices = {}  # {ticker: price} - price we sold at
+last_sell_was_loss = {}  # {ticker: bool} - whether last sell was a loss (for stricter cooldown)
+daily_reentry_count = {}  # {ticker: count} - how many times re-entered today
+
+# API token refresh tracking
+token_refresh_time = datetime.now()  # Track when we last refreshed
+TOKEN_REFRESH_INTERVAL_MINUTES = 25  # Refresh before 30-min expiry
+
+# Last known prices fallback (for API failures)
+last_known_prices = {}  # Store last successful price fetch
 
 log_message(f"\n⏰ Start Time: {start_time.strftime('%I:%M:%S %p EST')}")
 log_message(f"🎚️ Trading Mode: {trading_mode}")
@@ -329,9 +432,11 @@ log_message(f"   {', '.join(TRADING_UNIVERSE)}")
 try:
     log_message("\n🔌 Connecting to Questrade API...")
     questrade = QuestradeAPI()
+    token_refresh_time = datetime.now()  # Record initial authentication time
     log_message("✅ Connected to Questrade successfully!")
     log_message(f"   Server: {questrade.api_server}")
     log_message(f"   Mode: {questrade.server_type}")
+    log_message(f"   Token will auto-refresh every {TOKEN_REFRESH_INTERVAL_MINUTES} minutes")
 except Exception as e:
     error_msg = f"Failed to connect to Questrade: {str(e)}"
     log_message(f"❌ {error_msg}")
@@ -633,9 +738,182 @@ def filter_affordable_stocks(prices, max_capital):
     
     return affordable
 
+def validate_position_size(ticker, shares, price, current_capital):
+    """
+    FEATURE #1: CRITICAL SAFETY CHECK - Per-Trade Position Size Limit
+    
+    This prevents a single bad trade from destroying your account.
+    
+    DISASTER PREVENTED:
+    - Without this: $1000 account, buy $250 of stock (25%), gaps down 15% = $37.50 loss = 3.75% account loss
+    - With this: Capped at $200 (20%), same gap = $30 loss = 3% account loss
+    - Multiple bad trades without limit = account wipeout in hours
+    
+    Args:
+        ticker: Stock symbol
+        shares: Number of shares to buy
+        price: Current price per share
+        current_capital: Total available capital
+    
+    Returns:
+        (is_valid, adjusted_value): Tuple of validation result and max allowed value
+    """
+    position_value = shares * price
+    position_pct = position_value / current_capital if current_capital > 0 else 0
+    
+    # Calculate maximum allowed position value
+    if current_capital < SMALL_ACCOUNT_THRESHOLD:
+        # Small account: Use BASE_POSITION_SIZE_PCT for flexibility
+        max_allowed_pct = BASE_POSITION_SIZE_PCT
+    else:
+        # Larger account: Enforce strict 20% limit
+        max_allowed_pct = MAX_POSITION_SIZE_PCT
+    
+    max_allowed_value = current_capital * max_allowed_pct
+    
+    # Validate position size
+    if position_value > max_allowed_value:
+        log_message(f"\n🚨 POSITION SIZE VIOLATION DETECTED for {ticker}:")
+        log_message(f"   Attempted Position: ${position_value:.2f} ({position_pct:.1%} of capital)")
+        log_message(f"   Maximum Allowed: ${max_allowed_value:.2f} ({max_allowed_pct:.0%} limit)")
+        log_message(f"   Account Size: ${current_capital:.2f}")
+        log_message(f"   🛑 BLOCKING THIS TRADE - position exceeds safety limit")
+        log_message(f"   Reason: Prevents single trade from destroying >{max_allowed_pct:.0%} of account")
+        
+        # Send critical alert
+        send_error_alert(
+            "Position Size Safety Violation",
+            f"{ticker}: Attempted ${position_value:.2f} ({position_pct:.1%}) exceeds {max_allowed_pct:.0%} limit",
+            critical=True
+        )
+        
+        return False, max_allowed_value
+    
+    # Position size is safe
+    log_message(f"   ✅ Position size check passed: ${position_value:.2f} ({position_pct:.1%} of ${current_capital:.2f})")
+    return True, position_value
+
+def is_within_trading_window():
+    """
+    FEATURE #2: Time-of-Day Trading Window Check
+    
+    Block trades during chaotic open/close periods.
+    
+    DISASTER PREVENTED:
+    - First 5 min (9:30-9:35): Fake breakouts, wide spreads, stop hunts
+    - Last 5 min (3:55-4:00): Erratic MOC orders, poor execution prices
+    - Professional traders avoid these windows for good reason
+    
+    Returns:
+        (is_valid, reason): Tuple of boolean and explanation string
+    """
+    now = datetime.now()
+    current_time = now.time()
+    
+    # Unpack trading window times
+    start_hour, start_min = TRADING_START_TIME
+    end_hour, end_min = TRADING_END_TIME
+    
+    trading_start = time(start_hour, start_min)
+    trading_end = time(end_hour, end_min)
+    
+    # Check if before trading window
+    if current_time < trading_start:
+        return False, f"Before {start_hour}:{start_min:02d} AM (avoiding open volatility)"
+    
+    # Check if after trading window
+    if current_time >= trading_end:
+        return False, f"After {end_hour}:{end_min:02d} PM (avoiding close volatility)"
+    
+    return True, "Within trading window"
+
+def check_earnings_blackout(ticker):
+    """
+    FEATURE #3: Earnings Blackout Check
+    
+    Block trades ±30 minutes around earnings announcements.
+    
+    DISASTER PREVENTED:
+    - Stocks gap 10-20% on earnings regularly
+    - Your 5% stop loss becomes meaningless on a 15% gap
+    - No technical signal can predict earnings surprises
+    - Even intraday, earnings can hit during session causing halts/gaps
+    
+    Args:
+        ticker: Stock symbol to check
+    
+    Returns:
+        (is_blocked, reason): Tuple of boolean and explanation string
+    """
+    if not ALPHAVANTAGE_API_KEY:
+        # If no API key, fail-open (allow trade with warning)
+        return False, "Alpha Vantage API key not configured (check skipped)"
+    
+    try:
+        # Get today's date
+        today = datetime.now().strftime('%Y-%m-%d')
+        
+        # Alpha Vantage earnings calendar endpoint (CSV format)
+        url = "https://www.alphavantage.co/query"
+        params = {
+            'function': 'EARNINGS_CALENDAR',
+            'horizon': '3month',
+            'apikey': ALPHAVANTAGE_API_KEY
+        }
+        
+        # Make API request with timeout
+        response = requests.get(url, params=params, timeout=10)
+        
+        if response.status_code != 200:
+            # API error - fail-open but log warning
+            log_message(f"   ⚠️ Earnings API returned {response.status_code} - proceeding without check")
+            return False, f"API error {response.status_code} (allowing trade)"
+        
+        # Parse CSV response
+        import csv
+        from io import StringIO
+        
+        csv_data = StringIO(response.text)
+        reader = csv.DictReader(csv_data)
+        
+        # Check if ticker has earnings today
+        for row in reader:
+            if row.get('symbol', '').upper() == ticker.upper():
+                report_date = row.get('reportDate', '')
+                
+                # Check if report date is today
+                if report_date == today:
+                    earnings_time = row.get('timeOfTheDay', '').lower().strip()
+                    
+                    # If earnings time is specified, check timing
+                    if earnings_time:
+                        if 'post' in earnings_time or 'after' in earnings_time:
+                            # Earnings after close - safe to trade during day
+                            return False, f"Earnings after close today (safe to trade)"
+                        elif 'pre' in earnings_time or 'before' in earnings_time:
+                            # Earnings before open - already happened, but might still be volatile
+                            return True, f"Earnings reported this morning (avoiding volatility)"
+                        else:
+                            # Other time specified - block for safety
+                            return True, f"Earnings TODAY at {earnings_time} (±{EARNINGS_BLACKOUT_MINUTES}min blackout)"
+                    else:
+                        # No time specified - block to be safe
+                        return True, f"Earnings scheduled TODAY (time unknown - blocking)"
+        
+        # No earnings found for this ticker today
+        return False, "No earnings today"
+    
+    except requests.Timeout:
+        log_message(f"   ⚠️ Earnings API timeout for {ticker} - proceeding without check")
+        return False, "API timeout (allowing trade)"
+    except Exception as e:
+        log_message(f"   ⚠️ Earnings check error for {ticker}: {str(e)}")
+        return False, f"Check failed: {str(e)} (allowing trade)"
+
 def check_positions(current_prices):
     """Check existing positions for exits"""
     global capital, positions, trades, consecutive_losses, total_closed_trades
+    global last_sell_times, last_sell_prices, last_sell_was_loss, daily_reentry_count  # Add cooldown tracking
     
     exits = []
     for ticker, pos in list(positions.items()):
@@ -668,6 +946,25 @@ def check_positions(current_prices):
         pnl = exit_value - (pos['shares'] * pos['entry_price'] + COMMISSION)
         pnl_pct = ((exit_price - pos['entry_price']) / pos['entry_price']) * 100
         
+        # Calculate hold duration
+        hold_minutes = int((datetime.now() - pos['entry_time']).total_seconds() / 60)
+        
+        # Log trade to history
+        log_trade_to_db(
+            ticker=ticker,
+            action='SELL',
+            shares=pos['shares'],
+            price=exit_price,
+            capital_before=capital - exit_value,  # Capital before this sell
+            total_positions=len(positions) - 1,  # Will be one less after deletion
+            exit_reason=reason,
+            entry_price=pos['entry_price'],
+            hold_minutes=hold_minutes,
+            pnl=pnl,
+            pnl_pct=pnl_pct,
+            notes=f"Exit: {reason.replace('_', ' ').title()}"
+        )
+        
         # Track consecutive losses
         total_closed_trades += 1
         if pnl < 0:
@@ -687,6 +984,15 @@ def check_positions(current_prices):
             'reason': reason
         }
         trades.append(trade)
+        
+        # ===== TRACK SELL FOR RE-ENTRY COOLDOWN =====
+        last_sell_times[ticker] = datetime.now()
+        last_sell_prices[ticker] = exit_price
+        last_sell_was_loss[ticker] = (pnl < 0)  # Track if this was a loss
+        daily_reentry_count[ticker] = daily_reentry_count.get(ticker, 0) + 1
+        cooldown_type = "loss" if pnl < 0 else "win"
+        log_message(f"   📝 Cooldown activated for {ticker} ({cooldown_type}, re-entries today: {daily_reentry_count[ticker]})")
+        # ===== END COOLDOWN TRACKING =====
         
         # Send webhook notification
         webhook_data = {
@@ -719,7 +1025,13 @@ def check_positions(current_prices):
 
 def scan_and_trade(historical_data, current_prices, available_capital):
     """Scan for opportunities and enter trades"""
-    global capital, positions, consecutive_losses, market_regime_ok
+    global capital, positions, consecutive_losses, market_regime_ok, starting_equity
+    
+    # FEATURE #2: Time-of-Day Trading Window Check
+    is_valid_time, time_reason = is_within_trading_window()
+    if not is_valid_time:
+        log_message(f"\n🚫 TRADING WINDOW BLOCKED: {time_reason}", False)
+        return
     
     # CIRCUIT BREAKER 1: Check consecutive losses
     if consecutive_losses >= MAX_CONSECUTIVE_LOSSES:
@@ -825,6 +1137,43 @@ def scan_and_trade(historical_data, current_prices, available_capital):
     for ticker, score in top_stocks[:available_slots]:
         current_price = current_prices[ticker]
         
+        # ===== RE-ENTRY COOLDOWN CHECKS =====
+        
+        # Check 1: Time-based cooldown (stricter after losses)
+        if ticker in last_sell_times:
+            time_since_sell = (datetime.now() - last_sell_times[ticker]).total_seconds() / 60
+            required_cooldown = COOLDOWN_AFTER_LOSS_MINUTES if last_sell_was_loss.get(ticker, False) else COOLDOWN_MINUTES
+            if time_since_sell < required_cooldown:
+                log_message(f"   🚫 {ticker}: Cooldown active ({time_since_sell:.1f} min < {required_cooldown} min)", False)
+                continue
+        
+        # Check 2: Price change requirement (1%)
+        if ticker in last_sell_prices:
+            price_change_pct = abs(current_price - last_sell_prices[ticker]) / last_sell_prices[ticker]
+            if price_change_pct < MIN_PRICE_CHANGE_PCT:
+                log_message(f"   🚫 {ticker}: Price unchanged ({price_change_pct:.2%} < {MIN_PRICE_CHANGE_PCT:.1%})", False)
+                continue
+        
+        # Check 2b: Higher momentum threshold for re-entry (especially after loss)
+        if ticker in last_sell_times:
+            if score < MIN_MOMENTUM_REENTRY:
+                log_message(f"   🚫 {ticker}: Momentum too low for re-entry ({score:.4f} < {MIN_MOMENTUM_REENTRY})", False)
+                continue
+        
+        # Check 3: Daily re-entry limit (max 2 times per day)
+        daily_count = daily_reentry_count.get(ticker, 0)
+        if daily_count >= MAX_DAILY_REENTRIES:
+            log_message(f"   🚫 {ticker}: Max re-entries reached ({daily_count}/{MAX_DAILY_REENTRIES} today)", False)
+            continue
+        
+        # ===== END COOLDOWN CHECKS =====
+        
+        # FEATURE #3: Earnings Blackout Check
+        is_blocked, earnings_reason = check_earnings_blackout(ticker)
+        if is_blocked:
+            log_message(f"   🚫 {ticker}: {earnings_reason}", False)
+            continue
+        
         # Calculate position size (supports fractional shares!)
         max_position_value = capital * BASE_POSITION_SIZE_PCT
         
@@ -836,6 +1185,26 @@ def scan_and_trade(historical_data, current_prices, available_capital):
             # Whole shares: traditional calculation
             shares = int((max_position_value - COMMISSION) / current_price)
             cost = shares * current_price + COMMISSION
+        
+        # FEATURE #1: CRITICAL SAFETY CHECK - Validate position size before order
+        is_valid, adjusted_max_value = validate_position_size(ticker, shares, current_price, capital)
+        
+        if not is_valid:
+            # Position size exceeds safety limit - recalculate with adjusted size
+            log_message(f"   📉 Adjusting {ticker} position to safety limit: ${adjusted_max_value:.2f}")
+            
+            if FRACTIONAL_SHARES_ENABLED:
+                shares = adjusted_max_value / current_price
+                cost = shares * current_price
+            else:
+                shares = int(adjusted_max_value / current_price)
+                cost = shares * current_price + COMMISSION
+            
+            # Validate again after adjustment
+            is_valid_retry, _ = validate_position_size(ticker, shares, current_price, capital)
+            if not is_valid_retry:
+                log_message(f"   ❌ {ticker}: Still exceeds limit after adjustment - SKIPPING")
+                continue
         
         # Ensure we have at least a minimum position
         if cost >= 1.0 and cost <= capital * 0.85:
@@ -854,6 +1223,9 @@ def scan_and_trade(historical_data, current_prices, available_capital):
                 
                 capital -= cost
                 
+                # Dynamic take profit based on stock price
+                take_profit_pct = HIGH_PRICE_TAKE_PROFIT_PCT if fill_price > HIGH_PRICE_THRESHOLD else TAKE_PROFIT_PCT
+                
                 positions[ticker] = {
                     'shares': shares,
                     'entry_price': fill_price,
@@ -861,7 +1233,7 @@ def scan_and_trade(historical_data, current_prices, available_capital):
                     'entry_time': datetime.now(),
                     'highest_price': fill_price,
                     'stop_loss': fill_price * (1 - STOP_LOSS_PCT),
-                    'take_profit': fill_price * (1 + TAKE_PROFIT_PCT),
+                    'take_profit': fill_price * (1 + take_profit_pct),
                     'trailing_stop': fill_price * (1 - TRAILING_STOP_PCT),
                     'current_price': fill_price,
                     'unrealized_pnl': 0,
@@ -870,6 +1242,17 @@ def scan_and_trade(historical_data, current_prices, available_capital):
                 
                 # Save position to database
                 save_position_to_db(ticker, positions[ticker])
+                
+                # Log trade to history
+                log_trade_to_db(
+                    ticker=ticker,
+                    action='BUY',
+                    shares=shares,
+                    price=fill_price,
+                    capital_before=capital + cost,  # Capital before this buy
+                    total_positions=len(positions),
+                    notes=f"Momentum score: {score:.4f}"
+                )
                 
                 trade = {
                     'time': datetime.now().strftime('%I:%M:%S %p'),
@@ -915,6 +1298,18 @@ try:
         current_time = now.strftime('%I:%M:%S %p')
         elapsed_minutes = int((now - start_time).total_seconds() / 60)
         
+        # API Token Auto-Refresh (every 25 minutes to prevent 30-min expiry)
+        minutes_since_refresh = (now - token_refresh_time).total_seconds() / 60
+        if minutes_since_refresh >= TOKEN_REFRESH_INTERVAL_MINUTES:
+            try:
+                log_message(f"   🔄 Refreshing Questrade API token (last refresh: {minutes_since_refresh:.1f} min ago)...")
+                questrade.refresh_token()
+                token_refresh_time = now
+                log_message(f"   ✅ Token refreshed successfully")
+            except Exception as e:
+                log_message(f"   ⚠️ Token refresh failed: {str(e)}")
+                log_message(f"   Will retry on next cycle")
+        
         # Check for remote stop flag
         if Path(REMOTE_STOP_FILE).exists():
             log_message(f"\n🛑 REMOTE STOP DETECTED")
@@ -954,14 +1349,28 @@ try:
         # Get current prices from Questrade
         log_message("   📊 Fetching live prices from Questrade...")
         current_prices = get_current_prices_questrade(TRADING_UNIVERSE)
-        log_message(f"   ✓ Got prices for {len(current_prices)} stocks")
+        
+        # Fallback to last known prices if API fails
+        if not current_prices or len(current_prices) == 0:
+            log_message(f"   ⚠️ API returned no prices - using last known prices")
+            if last_known_prices:
+                current_prices = last_known_prices.copy()
+                log_message(f"   ✓ Using {len(current_prices)} cached prices")
+            else:
+                log_message(f"   ❌ No cached prices available - skipping this cycle")
+                time_sleep.sleep(CHECK_INTERVAL_SECONDS)
+                continue
+        else:
+            # Update cache with successful price fetch
+            last_known_prices = current_prices.copy()
+            log_message(f"   ✓ Got prices for {len(current_prices)} stocks")
         
         # Check existing positions for exits
         if positions:
             check_positions(current_prices)
-            # Update position P&L in database
+            # Update position P&L in database (only if shares > 0)
             for ticker, pos in positions.items():
-                if ticker in current_prices:
+                if ticker in current_prices and pos['shares'] > 0:
                     pos['current_price'] = current_prices[ticker]
                     pos['unrealized_pnl'] = pos['shares'] * (current_prices[ticker] - pos['entry_price']) - COMMISSION
                     pos['unrealized_pnl_pct'] = ((current_prices[ticker] - pos['entry_price']) / pos['entry_price']) * 100
@@ -1025,7 +1434,7 @@ try:
                     log_message(f"      {ticker}: ${current_price:.2f} ({unrealized_pct:+.2f}%) - {pos['shares']} shares")
         
         # Wait for next check
-        time.sleep(CHECK_INTERVAL_SECONDS)
+        time_sleep.sleep(CHECK_INTERVAL_SECONDS)
         
 except KeyboardInterrupt:
     log_message("\n\n⚠️  Test stopped by user")

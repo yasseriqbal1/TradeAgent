@@ -1,0 +1,115 @@
+{
+  "name": "Earnings Intelligence",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 9 * * 1-5"
+            }
+          ]
+        }
+      },
+      "name": "Schedule: Daily 9:00 AM",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://www.alphavantage.co/query",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "queryAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "function",
+              "value": "EARNINGS_CALENDAR"
+            },
+            {
+              "name": "horizon",
+              "value": "3month"
+            },
+            {
+              "name": "apikey",
+              "value": "={{$env.ALPHAVANTAGE_API}}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "name": "Get Earnings (Alpha Vantage)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Your 55-stock trading universe\nconst myStocks = [\n  'AAPL', 'AMD', 'CRWD', 'DDOG', 'GOOG', 'META', 'MSFT', 'MU', 'NET', 'NVDA', 'PLTR', 'SHOP', 'SNOW',\n  'IONQ', 'QBTS', 'QUBT', 'RGTI', 'ARQQ',\n  'ABNB', 'BA', 'CAT', 'CMG', 'COST', 'DIS', 'HD', 'JNJ', 'KO', 'MCD', 'NKE', 'PEP', 'PG', 'SBUX', 'TGT', 'TSLA', 'UNH', 'V', 'WMT',\n  'CVS', 'ISRG', 'LLY', 'PFE', 'TMO', 'UNH',\n  'CVX', 'XOM',\n  'GE', 'HON',\n  'ADBE', 'NFLX', 'PYPL', 'SQ'\n];\n\n// Get CSV text from Alpha Vantage response\nlet csvText;\nconst input = $input.first();\nif (typeof input.json === 'string') {\n  csvText = input.json;\n} else if (input.json && input.json.body) {\n  csvText = input.json.body;\n} else if (input.binary && input.binary.data) {\n  csvText = input.binary.data.toString();\n} else {\n  // Fallback: try to get raw data\n  csvText = JSON.stringify(input.json);\n}\n\nconst lines = csvText.split('\\n');\nconst headers = lines[0].split(',');\n\nconst earnings = [];\nfor (let i = 1; i < lines.length; i++) {\n  if (!lines[i].trim()) continue;\n  const values = lines[i].split(',');\n  const row = {};\n  headers.forEach((h, idx) => {\n    row[h] = values[idx];\n  });\n  if (myStocks.includes(row.symbol)) {\n    earnings.push(row);\n  }\n}\n\n// Separate today vs this week\nconst today = new Date().toISOString().split('T')[0];\nconst todayEarnings = earnings.filter(e => e.reportDate === today);\nconst weekEarnings = earnings.filter(e => e.reportDate !== today && e.reportDate >= today);\n\nconst isMonday = new Date().getDay() === 1;\n\nlet msg = \"\";\n\n// TODAY'S EARNINGS (always show)\nif (todayEarnings.length > 0) {\n  msg += \"⚠️ **EARNINGS TODAY**\\n\\n\";\n  todayEarnings.forEach(e => {\n    const time = e.timeOfTheDay || 'unknown';\n    msg += `🎤 **${e.symbol}** (${time})\\n`;\n  });\n  msg += `\\n🚫 Bot will BLOCK these ${todayEarnings.length} stocks\\n\\n`;\n} else {\n  msg += \"✅ **NO EARNINGS TODAY**\\nAll 55 stocks available for trading.\\n\\n\";\n}\n\n// WEEKLY OVERVIEW (Monday only)\nif (isMonday && weekEarnings.length > 0) {\n  msg += \"━━━━━━━━━━━━━━━━━━━━\\n\";\n  msg += \"📅 **THIS WEEK AHEAD**\\n\\n\";\n  \n  // Group by date\n  const byDate = {};\n  weekEarnings.forEach(e => {\n    const date = e.reportDate;\n    if (!byDate[date]) byDate[date] = [];\n    byDate[date].push(e);\n  });\n  \n  Object.keys(byDate).sort().forEach(date => {\n    const d = new Date(date);\n    const dayName = d.toLocaleDateString('en-US', { weekday: 'short' });\n    const dateStr = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });\n    \n    msg += `**${dayName} ${dateStr}:** `;\n    msg += byDate[date].map(e => e.symbol).join(', ');\n    msg += \"\\n\";\n  });\n  \n  msg += `\\n⚠️ ${weekEarnings.length} more earnings this week`;\n}\n\nreturn [{ json: { message: msg } }];\n"
+      },
+      "name": "Build Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://discord.com/api/webhooks/YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "content",
+              "value": "={{ $json.message }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "name": "Discord: Send Alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [900, 300]
+    }
+  ],
+  "connections": {
+    "Schedule: Daily 9:00 AM": {
+      "main": [
+        [
+          {
+            "node": "Get Earnings (Alpha Vantage)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Earnings (Alpha Vantage)": {
+      "main": [
+        [
+          {
+            "node": "Build Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Message": {
+      "main": [
+        [
+          {
+            "node": "Discord: Send Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {}
+}
