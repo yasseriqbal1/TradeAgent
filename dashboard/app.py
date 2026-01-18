@@ -9,11 +9,20 @@ import psycopg2
 from datetime import datetime, date
 import os
 from dotenv import load_dotenv
+import redis
+import json
 
 # Load environment variables
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), '..', '.env'))
 
 app = Flask(__name__)
+
+# Redis connection for live prices
+def get_redis_connection():
+    try:
+        return redis.Redis(host='localhost', port=6379, decode_responses=True)
+    except:
+        return None
 
 # Database connection
 def get_db_connection():
@@ -243,12 +252,30 @@ def get_bot_status():
 
 @app.route('/api/live-prices')
 def get_live_prices():
-    """Get live stock prices - shows actively traded stocks from today"""
+    """Get live stock prices from Redis (real-time from bot's Questrade feed)"""
     try:
+        # Try Redis first (real-time prices from bot)
+        r = get_redis_connection()
+        if r:
+            data = r.get('live_prices')
+            if data:
+                parsed = json.loads(data)
+                prices_dict = parsed.get('prices', {})
+                
+                # Format for frontend
+                prices = []
+                for ticker, price in prices_dict.items():
+                    prices.append({
+                        'ticker': ticker,
+                        'price': round(price, 2),
+                        'change_pct': 0  # Calculate if needed
+                    })
+                return jsonify(prices)
+        
+        # Fallback to database if Redis unavailable
         conn = get_db_connection()
         cur = conn.cursor()
         
-        # Get all stocks traded today with their latest prices
         cur.execute("""
             SELECT DISTINCT ON (ticker)
                 ticker,
@@ -264,7 +291,6 @@ def get_live_prices():
             ticker = row[0]
             price = float(row[1])
             
-            # Get entry price for comparison (from earliest trade today)
             cur.execute("""
                 SELECT price 
                 FROM trades_history 
@@ -284,7 +310,6 @@ def get_live_prices():
                 'change_pct': round(change_pct, 2)
             })
         
-        # Also add open positions
         cur.execute("""
             SELECT ticker, current_price, entry_price
             FROM positions
@@ -293,7 +318,6 @@ def get_live_prices():
         
         for row in cur.fetchall():
             ticker = row[0]
-            # Skip if already in prices
             if any(p['ticker'] == ticker for p in prices):
                 continue
                 

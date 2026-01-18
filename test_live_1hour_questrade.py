@@ -13,6 +13,8 @@ from glob import glob
 from pathlib import Path
 import requests
 from dotenv import load_dotenv
+import json
+import redis
 
 # Import existing modules
 from quant_agent.questrade_loader import QuestradeAPI
@@ -1364,6 +1366,17 @@ try:
             # Update cache with successful price fetch
             last_known_prices = current_prices.copy()
             log_message(f"   ✓ Got prices for {len(current_prices)} stocks")
+            
+            # Write prices to Redis for dashboard (in-memory cache)
+            try:
+                r = redis.Redis(host='localhost', port=6379, decode_responses=True)
+                r.setex('live_prices', 60, json.dumps({
+                    'timestamp': datetime.now().isoformat(),
+                    'prices': current_prices
+                }))
+            except Exception as e:
+                # Silent fail - don't disrupt trading if Redis unavailable
+                pass
         
         # Check existing positions for exits
         if positions:
