@@ -105,6 +105,10 @@ class QuestradeAPI:
         except Exception as e:
             logger.error(f"Questrade authentication failed: {e}")
             raise
+
+    def refresh_access_token(self) -> None:
+        """Force refresh of the access token using the stored refresh token."""
+        self._authenticate()
     
     def _save_refresh_token(self, new_token: str):
         """Save new refresh token to .env file."""
@@ -167,6 +171,78 @@ class QuestradeAPI:
             
         except requests.exceptions.HTTPError as e:
             logger.error(f"API request failed: {e}")
+            logger.error(f"Response: {e.response.text if e.response else 'No response'}")
+            raise
+
+    def _post(self, endpoint: str, payload: Dict, params: Optional[Dict] = None):
+        """Make authenticated API POST request with retry on 401."""
+        self._ensure_authenticated()
+
+        api_server = self.api_server.rstrip('/')
+        endpoint = endpoint if not endpoint.startswith('/') else endpoint[1:]
+        url = f"{api_server}/{endpoint}"
+        headers = {
+            "Authorization": f"Bearer {self.access_token}",
+            "Content-Type": "application/json",
+        }
+
+        try:
+            response = requests.post(url, headers=headers, params=params or {}, json=payload, timeout=15)
+
+            if response.status_code == 401:
+                logger.warning("Received 401 Unauthorized on POST, re-authenticating...")
+                self._authenticate()
+                headers["Authorization"] = f"Bearer {self.access_token}"
+                response = requests.post(url, headers=headers, params=params or {}, json=payload, timeout=15)
+
+            if response.status_code >= 400:
+                logger.error(f"API POST failed: HTTP {response.status_code} for {url}")
+                try:
+                    logger.error(f"Response: {response.text}")
+                except Exception:
+                    logger.error("Response: <unavailable>")
+            response.raise_for_status()
+            return response.json()
+
+        except requests.exceptions.HTTPError as e:
+            logger.error(f"API POST failed: {e}")
+            logger.error(f"Response: {e.response.text if e.response else 'No response'}")
+            raise
+
+    def _delete(self, endpoint: str, params: Optional[Dict] = None):
+        """Make authenticated API DELETE request with retry on 401."""
+        self._ensure_authenticated()
+
+        api_server = self.api_server.rstrip('/')
+        endpoint = endpoint if not endpoint.startswith('/') else endpoint[1:]
+        url = f"{api_server}/{endpoint}"
+        headers = {"Authorization": f"Bearer {self.access_token}"}
+
+        try:
+            response = requests.delete(url, headers=headers, params=params or {}, timeout=15)
+
+            if response.status_code == 401:
+                logger.warning("Received 401 Unauthorized on DELETE, re-authenticating...")
+                self._authenticate()
+                headers["Authorization"] = f"Bearer {self.access_token}"
+                response = requests.delete(url, headers=headers, params=params or {}, timeout=15)
+
+            if response.status_code >= 400:
+                logger.error(f"API DELETE failed: HTTP {response.status_code} for {url}")
+                try:
+                    logger.error(f"Response: {response.text}")
+                except Exception:
+                    logger.error("Response: <unavailable>")
+            response.raise_for_status()
+            if response.text:
+                try:
+                    return response.json()
+                except Exception:
+                    return {"raw": response.text}
+            return {}
+
+        except requests.exceptions.HTTPError as e:
+            logger.error(f"API DELETE failed: {e}")
             logger.error(f"Response: {e.response.text if e.response else 'No response'}")
             raise
     
@@ -278,6 +354,48 @@ class QuestradeAPI:
         except Exception as e:
             logger.error(f"Failed to get positions: {e}")
             return []
+
+    def place_order(
+        self,
+        account_number: str,
+        symbol_id: int,
+        quantity: float,
+        action: str,
+        order_type: str = "Limit",
+        limit_price: Optional[float] = None,
+        time_in_force: str = "Day",
+        comment: str = "",
+    ) -> Dict:
+        """Place an order via Questrade.
+
+        This is intentionally minimal and meant for smoke testing.
+        """
+        payload: Dict = {
+            "symbolId": int(symbol_id),
+            "quantity": quantity,
+            "orderType": order_type,
+            "timeInForce": time_in_force,
+            "action": action,
+            "primaryRoute": "AUTO",
+            "isAllOrNone": False,
+            "isAnonymous": False,
+        }
+        if comment:
+            payload["comment"] = comment
+        if order_type.strip().lower() == "limit":
+            if limit_price is None:
+                raise ValueError("limit_price is required for Limit orders")
+            payload["limitPrice"] = float(limit_price)
+
+        return self._post(f"/v1/accounts/{account_number}/orders", payload)
+
+    def get_order(self, account_number: str, order_id: int) -> Dict:
+        """Fetch a specific order by id."""
+        return self._request(f"/v1/accounts/{account_number}/orders/{order_id}")
+
+    def cancel_order(self, account_number: str, order_id: int) -> Dict:
+        """Cancel an order by id."""
+        return self._delete(f"/v1/accounts/{account_number}/orders/{order_id}")
     
     def get_candles(self, symbol_id: int, start_date: datetime, end_date: datetime) -> pd.DataFrame:
         """

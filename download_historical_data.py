@@ -1,180 +1,170 @@
+"""Bulk historical data downloader.
+
+This script refreshes the CSVs used by the trading bot's momentum engine.
+
+The bot expects files at:
+  historical_data/historical_data_{TICKER}.csv
+
+with a Date index column (so it can load via `index_col='Date', parse_dates=True`).
 """
-Bulk Historical Data Downloader
-Downloads 5 years of historical data for multiple tickers using yfinance.
-Much faster than manual downloads from NASDAQ.com!
-"""
+
+from __future__ import annotations
+
 from datetime import datetime, timedelta
-from quant_agent.historical_data import HistoricalDataManager
+from pathlib import Path
+import argparse
+import re
+
 import pandas as pd
+import yfinance as yf
 
-def download_bulk_data(tickers, years=5, save_to_csv=True):
-    """
-    Download historical data for multiple tickers.
-    
-    Args:
-        tickers: List of ticker symbols
-        years: Number of years of history to download (default: 5)
-        save_to_csv: Save individual CSV files for each ticker
-    """
-    # Calculate date range
-    end_date = datetime.now()
-    start_date = end_date - timedelta(days=years*365)
-    
-    print("=" * 70)
-    print("Bulk Historical Data Download")
-    print("=" * 70)
-    print(f"\nTickers: {', '.join(tickers)}")
-    print(f"Date range: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}")
-    print(f"Period: {years} years")
-    print(f"Data source: yfinance (free, unlimited)")
-    
-    # Initialize data manager
-    print("\nInitializing data manager...")
-    data_manager = HistoricalDataManager()
-    
-    # Download data
-    print(f"\nDownloading data for {len(tickers)} tickers...")
-    print("This may take a minute...\n")
-    
-    historical_data = data_manager.download_historical_data(
-        tickers=tickers,
-        start_date=start_date.strftime('%Y-%m-%d'),
-        end_date=end_date.strftime('%Y-%m-%d'),
-        force_refresh=True  # Use yfinance, not Questrade
-    )
-    
-    # Summary
-    print("\n" + "=" * 70)
-    print("Download Summary")
-    print("=" * 70)
-    
-    successful = []
-    failed = []
-    
-    for ticker in tickers:
-        if ticker in historical_data and len(historical_data[ticker]) > 0:
-            df = historical_data[ticker]
-            successful.append(ticker)
-            
-            print(f"\n✅ {ticker}:")
-            print(f"   Rows: {len(df):,}")
-            print(f"   Date range: {df.index[0].strftime('%Y-%m-%d')} to {df.index[-1].strftime('%Y-%m-%d')}")
-            print(f"   Columns: {', '.join(df.columns)}")
-            
-            # Save to CSV if requested
-            if save_to_csv:
-                filename = f"historical_data_{ticker}_{years}yr.csv"
-                df.to_csv(filename)
-                print(f"   Saved: {filename}")
+
+def project_root() -> Path:
+    return Path(__file__).resolve().parent
+
+
+def detect_tickers_from_historical_data_dir(data_dir: Path) -> list[str]:
+    tickers: list[str] = []
+    pattern = re.compile(r"^historical_data_(?P<ticker>[A-Z0-9._-]+)\.csv$")
+    if not data_dir.exists():
+        return tickers
+
+    for path in sorted(data_dir.glob("historical_data_*.csv")):
+        match = pattern.match(path.name)
+        if match:
+            tickers.append(match.group("ticker"))
+    return tickers
+
+
+def _read_existing_last_date(csv_path: Path) -> pd.Timestamp | None:
+    try:
+        df = pd.read_csv(csv_path, parse_dates=['Date'])
+        if df.empty:
+            return None
+        return pd.to_datetime(df['Date']).max()
+    except Exception:
+        return None
+
+
+def refresh_existing_csvs(
+    tickers: list[str],
+    output_dir: Path,
+    years: int = 2,
+    force_full: bool = False,
+):
+    """Fast refresh: bulk-download missing tail data with yfinance and append to CSVs."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    today = datetime.now().date()
+    end_exclusive = today + timedelta(days=1)  # yfinance end is exclusive
+
+    csv_paths = {t: (output_dir / f"historical_data_{t}.csv") for t in tickers}
+    last_dates: dict[str, pd.Timestamp | None] = {t: _read_existing_last_date(p) for t, p in csv_paths.items()}
+
+    if force_full:
+        start_date = today - timedelta(days=years * 365)
+    else:
+        # Incremental start: (min last_date among existing) or years fallback
+        existing_dates = [d for d in last_dates.values() if d is not None]
+        if existing_dates:
+            start_date = (min(existing_dates).date() - timedelta(days=3))
         else:
+            start_date = today - timedelta(days=years * 365)
+
+    print(f"\nFast refresh window: {start_date} -> {end_exclusive} (end exclusive)")
+
+    # Bulk download
+    data = yf.download(
+        tickers=tickers,
+        start=start_date.strftime('%Y-%m-%d'),
+        end=end_exclusive.strftime('%Y-%m-%d'),
+        group_by='ticker',
+        auto_adjust=False,
+        threads=True,
+        progress=False,
+    )
+
+    updated = 0
+    failed: list[str] = []
+
+    for ticker in tickers:
+        try:
+            if isinstance(data.columns, pd.MultiIndex):
+                if ticker not in data.columns.get_level_values(0):
+                    failed.append(ticker)
+                    continue
+                df_new = data[ticker].copy()
+            else:
+                # Single ticker download returns a flat frame
+                df_new = data.copy()
+
+            if df_new is None or df_new.empty:
+                failed.append(ticker)
+                continue
+
+            # Normalize columns and index
+            df_new = df_new.rename(columns={'Adj Close': 'AdjClose'})
+            keep_cols = [c for c in ['Open', 'High', 'Low', 'Close', 'Volume'] if c in df_new.columns]
+            df_new = df_new[keep_cols]
+            df_new.index = pd.to_datetime(df_new.index)
+            df_new.index.name = 'Date'
+            df_new = df_new.dropna(subset=['Close'])
+
+            out_path = csv_paths[ticker]
+            if out_path.exists() and not force_full:
+                df_old = pd.read_csv(out_path, parse_dates=['Date']).set_index('Date')
+                df_old.index = pd.to_datetime(df_old.index)
+                df_old = df_old[[c for c in ['Open', 'High', 'Low', 'Close', 'Volume'] if c in df_old.columns]]
+                df_combined = pd.concat([df_old, df_new], axis=0)
+                df_combined = df_combined[~df_combined.index.duplicated(keep='last')]
+                df_combined = df_combined.sort_index()
+            else:
+                df_combined = df_new.sort_index()
+
+            df_combined.to_csv(out_path)
+            updated += 1
+        except Exception:
             failed.append(ticker)
-            print(f"\n❌ {ticker}: Download failed")
-    
-    print("\n" + "=" * 70)
-    print(f"✅ Successful: {len(successful)}/{len(tickers)}")
+
+    print(f"\n✅ Updated: {updated}/{len(tickers)}")
     if failed:
-        print(f"❌ Failed: {', '.join(failed)}")
-    
-    return historical_data
+        print(f"❌ Failed: {', '.join(failed[:12])}{'...' if len(failed) > 12 else ''}")
 
-
-def import_nasdaq_csv(csv_file, ticker):
-    """
-    Import manually downloaded NASDAQ CSV file.
-    Converts NASDAQ format to standard format.
-    
-    Args:
-        csv_file: Path to NASDAQ CSV file
-        ticker: Ticker symbol
-    
-    Returns:
-        DataFrame with standardized columns
-    """
-    print(f"\nImporting {csv_file}...")
-    
-    # Read CSV
-    df = pd.read_csv(csv_file)
-    
-    # NASDAQ format: Date, Close/Last, Volume, Open, High, Low
-    # Clean up column names
-    df.columns = df.columns.str.strip()
-    
-    # Rename columns to standard format
-    column_mapping = {
-        'Date': 'Date',
-        'Close/Last': 'Close',
-        'Volume': 'Volume',
-        'Open': 'Open',
-        'High': 'High',
-        'Low': 'Low'
-    }
-    df = df.rename(columns=column_mapping)
-    
-    # Remove $ signs from prices
-    for col in ['Close', 'Open', 'High', 'Low']:
-        if df[col].dtype == 'object':
-            df[col] = df[col].str.replace('$', '').str.replace(',', '').astype(float)
-    
-    # Convert Volume to integer
-    if df['Volume'].dtype == 'object':
-        df['Volume'] = df['Volume'].str.replace(',', '').astype(int)
-    
-    # Convert date to datetime and set as index
-    df['Date'] = pd.to_datetime(df['Date'])
-    df = df.set_index('Date')
-    
-    # Sort by date (NASDAQ downloads are newest first)
-    df = df.sort_index()
-    
-    # Reorder columns to match standard format
-    df = df[['Open', 'High', 'Low', 'Close', 'Volume']]
-    
-    print(f"✅ Imported {len(df)} rows")
-    print(f"   Date range: {df.index[0].strftime('%Y-%m-%d')} to {df.index[-1].strftime('%Y-%m-%d')}")
-    
-    # Save in standardized format
-    output_file = f"historical_data_{ticker}_5yr.csv"
-    df.to_csv(output_file)
-    print(f"   Saved: {output_file}")
-    
-    return df
+    return updated, failed
 
 
 if __name__ == "__main__":
-    # Example 1: Bulk download (RECOMMENDED)
+    parser = argparse.ArgumentParser(description="Refresh bot historical_data CSVs using yfinance")
+    parser.add_argument(
+        "--tickers",
+        nargs="*",
+        help="Tickers to download. If omitted, auto-detect from historical_data/historical_data_*.csv",
+    )
+    parser.add_argument("--years", type=int, default=2, help="Years of history to download (default: 2)")
+    parser.add_argument(
+        "--full",
+        action="store_true",
+        help="Force full re-download (slower). Default is fast incremental refresh.",
+    )
+    args = parser.parse_args()
+
+    root = project_root()
+    data_dir = root / "historical_data"
+
+    tickers = [t.strip().upper() for t in (args.tickers or []) if t.strip()]
+    if not tickers:
+        tickers = detect_tickers_from_historical_data_dir(data_dir)
+
+    if not tickers:
+        raise SystemExit(
+            "No tickers provided and none detected. Provide --tickers, or create files in historical_data/ first."
+        )
+
     print("=" * 70)
-    print("OPTION 1: Automated Bulk Download (RECOMMENDED)")
+    print("Refreshing bot historical data")
     print("=" * 70)
-    
-    # Your tickers - add as many as you want!
-    tickers = [
-        'PLTR',  # Palantir (you already downloaded this manually)
-        'MU',    # Micron
-        'NVDA',  # NVIDIA
-        'AMD',   # AMD
-        'AAPL',  # Apple
-        'MSFT',  # Microsoft
-        'GOOGL', # Google
-        'TSLA',  # Tesla
-        'META',  # Meta
-        'AMZN',  # Amazon
-    ]
-    
-    # Download all at once - much faster than manual!
-    historical_data = download_bulk_data(tickers, years=5, save_to_csv=True)
-    
-    # Example 2: Import manually downloaded NASDAQ CSV (if you prefer)
-    print("\n\n" + "=" * 70)
-    print("OPTION 2: Import Manual NASDAQ Downloads")
-    print("=" * 70)
-    print("\nIf you already downloaded CSV files from NASDAQ.com:")
-    print("  df = import_nasdaq_csv('PLTR_5yr.csv', 'PLTR')")
-    print("\nBut automated download is faster and easier!")
-    
-    print("\n" + "=" * 70)
-    print("Done!")
-    print("=" * 70)
-    print("\nNext steps:")
-    print("  1. Review the CSV files created")
-    print("  2. Use them for backtesting")
-    print("  3. Add more tickers to the list above and re-run")
+
+    # Fast path by default for "market is about to open" scenarios.
+    refresh_existing_csvs(tickers, output_dir=data_dir, years=args.years, force_full=args.full)
+
+    print("\nDone. Next: re-run the bot; the freshness check should pass.")

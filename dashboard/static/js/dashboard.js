@@ -42,10 +42,10 @@ async function updateSummary() {
 
     // Realized/Unrealized
     document.getElementById("realizedPnl").textContent = formatCurrency(
-      data.total_pnl
+      data.total_pnl,
     );
     document.getElementById("unrealizedPnl").textContent = formatCurrency(
-      data.unrealized_pnl
+      data.unrealized_pnl,
     );
 
     // Win Rate
@@ -56,12 +56,41 @@ async function updateSummary() {
     document.getElementById("wins").textContent = data.wins;
     document.getElementById("sells").textContent = data.sells;
 
+    // Trade quality extras
+    const pfEl = document.getElementById("profitFactor");
+    if (pfEl)
+      pfEl.textContent = data.profit_factor == null ? "—" : data.profit_factor;
+
+    const avgWinEl = document.getElementById("avgWin");
+    if (avgWinEl) avgWinEl.textContent = formatCurrency(data.avg_win || 0);
+
+    const avgLossEl = document.getElementById("avgLoss");
+    if (avgLossEl) avgLossEl.textContent = formatCurrency(data.avg_loss || 0);
+
     // Current Equity
     const equityEl = document.getElementById("currentEquity");
     equityEl.textContent = formatCurrency(data.current_equity);
     animateValue(equityEl);
 
+    const cashEl = document.getElementById("cashValue");
+    if (cashEl) cashEl.textContent = formatCurrency(data.cash_value || 0);
+
+    const investedEl = document.getElementById("investedValue");
+    if (investedEl)
+      investedEl.textContent = formatCurrency(data.invested_value || 0);
+
+    const exposureEl = document.getElementById("exposurePct");
+    if (exposureEl) exposureEl.textContent = `${data.exposure_pct || 0}%`;
+
     document.getElementById("openPositions").textContent = data.open_positions;
+
+    // Equity source / mode label
+    const equitySourceEl = document.getElementById("equitySource");
+    if (equitySourceEl) {
+      const src = data.equity_source || data.source || "—";
+      const mode = data.trading_mode ? ` • ${data.trading_mode}` : "";
+      equitySourceEl.textContent = `Source: ${src}${mode}`;
+    }
 
     // Trades Today
     const tradesEl = document.getElementById("totalTrades");
@@ -76,14 +105,17 @@ async function updateSummary() {
       data.first_trade || "--:--";
     document.getElementById("lastTrade").textContent =
       data.last_trade || "--:--";
+
+    const lastTradeTimeEl = document.getElementById("lastTradeTime");
+    if (lastTradeTimeEl)
+      lastTradeTimeEl.textContent = data.last_trade || "--:--";
     document.getElementById("avgPnl").textContent = formatCurrency(
-      data.avg_pnl
+      data.avg_pnl,
     );
 
     // Last Update
-    document.getElementById(
-      "lastUpdate"
-    ).textContent = `Last update: ${data.last_update}`;
+    document.getElementById("lastUpdate").textContent =
+      `Last update: ${data.last_update}`;
   } catch (error) {
     console.error("Error updating summary:", error);
   }
@@ -115,8 +147,8 @@ async function updatePositions() {
           pos.unrealized_pnl > 0
             ? "pnl-positive"
             : pos.unrealized_pnl < 0
-            ? "pnl-negative"
-            : "pnl-neutral";
+              ? "pnl-negative"
+              : "pnl-neutral";
 
         return `
                 <tr>
@@ -125,11 +157,11 @@ async function updatePositions() {
                     <td class="text-end">$${pos.entry_price.toFixed(2)}</td>
                     <td class="text-end">$${pos.current_price.toFixed(2)}</td>
                     <td class="text-end ${pnlClass}">${formatCurrency(
-          pos.unrealized_pnl
-        )}</td>
+                      pos.unrealized_pnl,
+                    )}</td>
                     <td class="text-end ${pnlClass}">${formatPercent(
-          pos.unrealized_pnl_pct
-        )}</td>
+                      pos.unrealized_pnl_pct,
+                    )}</td>
                     <td>${pos.hold_time}</td>
                 </tr>
             `;
@@ -147,9 +179,8 @@ async function updateTrades() {
     const trades = await response.json();
 
     const tbody = document.getElementById("tradesTable");
-    document.getElementById(
-      "tradeCount"
-    ).textContent = `${trades.length} trades`;
+    document.getElementById("tradeCount").textContent =
+      `${trades.length} trades`;
 
     if (trades.length === 0) {
       tbody.innerHTML = `
@@ -172,8 +203,8 @@ async function updateTrades() {
             ? trade.pnl > 0
               ? "pnl-positive"
               : trade.pnl < 0
-              ? "pnl-negative"
-              : "pnl-neutral"
+                ? "pnl-negative"
+                : "pnl-neutral"
             : "";
 
         const pnlDisplay =
@@ -206,6 +237,21 @@ async function updateBotStatus() {
     const response = await fetch("/api/status");
     const status = await response.json();
 
+    // Data feed / quote freshness banner
+    const feedRow = document.getElementById("feedAlertRow");
+    const feedEl = document.getElementById("feedAlert");
+    if (feedRow && feedEl) {
+      const feedOk = status.data_feed_ok;
+      const reason = status.data_feed_reason;
+      if (feedOk === false) {
+        const details = reason ? ` — ${reason}` : "";
+        feedEl.textContent = `Trading paused: quotes not fresh${details}`;
+        feedRow.style.display = "";
+      } else {
+        feedRow.style.display = "none";
+      }
+    }
+
     const indicator = document.querySelector(".status-indicator");
     const statusText = document.querySelector(".status-text");
 
@@ -214,10 +260,13 @@ async function updateBotStatus() {
       "status-live",
       "status-idle",
       "status-error",
-      "status-loading"
+      "status-loading",
     );
 
-    if (status.is_running) {
+    const effectiveStatus =
+      status.status || (status.is_running ? "LIVE" : "IDLE");
+
+    if (effectiveStatus === "LIVE") {
       indicator.classList.add("status-live");
       statusText.textContent = "LIVE";
       statusText.style.color = "var(--success-color)";
@@ -241,7 +290,26 @@ async function updateBotStatus() {
 async function updateLiveTicker() {
   try {
     const response = await fetch("/api/live-prices");
-    const prices = await response.json();
+    const payload = await response.json();
+    const prices = Array.isArray(payload) ? payload : payload.prices || [];
+    const source = Array.isArray(payload) ? "db" : payload.source || "unknown";
+
+    const sourceEl = document.getElementById("priceSource");
+    if (sourceEl) {
+      sourceEl.classList.remove("is-live", "is-degraded", "is-error");
+      if (source === "redis") {
+        sourceEl.textContent = "redis";
+        sourceEl.classList.add("is-live");
+      } else if (source === "db") {
+        sourceEl.textContent = "db";
+        sourceEl.classList.add("is-degraded");
+      } else if (source === "error") {
+        sourceEl.textContent = "error";
+        sourceEl.classList.add("is-error");
+      } else {
+        sourceEl.textContent = source;
+      }
+    }
 
     if (prices.length === 0) return;
 
@@ -254,8 +322,8 @@ async function updateLiveTicker() {
           stock.change_pct > 0
             ? "positive"
             : stock.change_pct < 0
-            ? "negative"
-            : "neutral";
+              ? "negative"
+              : "neutral";
         const changeSign = stock.change_pct > 0 ? "+" : "";
 
         return `
@@ -277,6 +345,190 @@ async function updateLiveTicker() {
   }
 }
 
+// Update dip suggestions panel
+async function updateDipSuggestions() {
+  try {
+    const response = await fetch("/api/dip-suggestions");
+    const payload = await response.json();
+
+    const cardEl = document.getElementById("dipSuggestionsCard");
+    const listEl = document.getElementById("dipSuggestionsList");
+    const updatedEl = document.getElementById("dipSuggestionsUpdated");
+    const noteEl = document.getElementById("dipSuggestionsNote");
+    if (!listEl) return;
+
+    const enabled = payload.enabled === true;
+    const items = payload.items || [];
+
+    // User preference: show nothing when market closed or no live data.
+    if (!enabled || items.length === 0) {
+      if (cardEl) cardEl.style.display = "none";
+      return;
+    }
+
+    if (cardEl) cardEl.style.display = "";
+    if (updatedEl) updatedEl.textContent = payload.generated_at || "--:--";
+    if (noteEl)
+      noteEl.textContent =
+        payload.notes ||
+        "Heuristic signals from live prices; informational only.";
+
+    const badgeClass = (priority) => {
+      if (priority === "URGENT") return "bg-danger";
+      if (priority === "HIGH") return "bg-warning text-dark";
+      if (priority === "MEDIUM") return "bg-primary";
+      return "bg-secondary";
+    };
+
+    listEl.innerHTML = items
+      .map((s) => {
+        const reasons = (s.reasons || []).slice(0, 3).join(" • ");
+        return `
+          <div class="dip-suggestion-item">
+            <div class="d-flex justify-content-between align-items-center mb-1">
+              <div class="d-flex align-items-center gap-2">
+                <span class="ticker-badge">${s.ticker}</span>
+                <span class="badge ${badgeClass(s.priority)}">${s.priority}</span>
+              </div>
+              <div class="text-end">
+                <div class="dip-suggestion-price">$${Number(s.price).toFixed(2)}</div>
+                <div class="dip-suggestion-score text-muted">Score ${Number(s.score).toFixed(1)}</div>
+              </div>
+            </div>
+            <div class="dip-suggestion-reasons text-muted">${reasons}</div>
+          </div>
+        `;
+      })
+      .join("");
+  } catch (error) {
+    console.error("Error updating dip suggestions:", error);
+  }
+}
+
+// Update critical monitoring panel
+async function updateCriticalMonitor() {
+  try {
+    const response = await fetch("/api/critical-monitor");
+    const payload = await response.json();
+
+    const cardEl = document.getElementById("criticalMonitorCard");
+    const updatedEl = document.getElementById("criticalMonitorUpdated");
+    const noteEl = document.getElementById("criticalMonitorNote");
+    const overallEl = document.getElementById("criticalMonitorOverall");
+    const indEl = document.getElementById("criticalMonitorIndicators");
+    const alertsEl = document.getElementById("criticalMonitorAlerts");
+    if (!cardEl || !indEl || !alertsEl) return;
+
+    if (updatedEl) updatedEl.textContent = payload.generated_at || "--:--";
+    if (noteEl) noteEl.textContent = payload.notes || "";
+
+    const overall = (payload.overall || "unknown").toString().toUpperCase();
+    if (overallEl) {
+      overallEl.textContent = overall;
+      overallEl.className = "badge";
+      if (overall === "CRITICAL") overallEl.classList.add("bg-danger");
+      else if (overall === "WARNING")
+        overallEl.classList.add("bg-warning", "text-dark");
+      else if (overall === "OK") overallEl.classList.add("bg-success");
+      else overallEl.classList.add("bg-secondary");
+    }
+
+    const indicators = payload.indicators || [];
+    indEl.innerHTML = indicators
+      .map((i) => {
+        const st = (i.status || "unknown").toString().toUpperCase();
+        const badge =
+          st === "CRITICAL"
+            ? "bg-danger"
+            : st === "WARNING"
+              ? "bg-warning text-dark"
+              : st === "OK"
+                ? "bg-success"
+                : "bg-secondary";
+
+        const val =
+          i.value == null
+            ? "—"
+            : i.unit === "USD/bbl"
+              ? `$${Number(i.value).toFixed(2)}`
+              : Number(i.value).toFixed(2);
+
+        const hint = i.guidance
+          ? `<div class="text-muted small">${i.guidance}</div>`
+          : "";
+
+        return `
+          <div class="critical-indicator-item">
+            <div class="d-flex justify-content-between align-items-center">
+              <div class="fw-semibold">${i.name}</div>
+              <div class="d-flex align-items-center gap-2">
+                <div class="critical-indicator-value">${val}</div>
+                <span class="badge ${badge}">${st}</span>
+              </div>
+            </div>
+            ${hint}
+          </div>
+        `;
+      })
+      .join("");
+
+    const alerts = payload.alerts || [];
+    if (alerts.length === 0) {
+      alertsEl.innerHTML = `<div class="text-muted small">No external critical alerts.</div>`;
+    } else {
+      const escapeHtml = (s) =>
+        String(s ?? "")
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#39;");
+
+      alertsEl.innerHTML = alerts
+        .map((a) => {
+          const sev = (a.severity || "info").toString().toUpperCase();
+          const badge =
+            sev === "CRITICAL"
+              ? "bg-danger"
+              : sev === "WARNING"
+                ? "bg-warning text-dark"
+                : "bg-secondary";
+          const ts = a.ts ? `<span class="text-muted">${a.ts}</span>` : "";
+          const titleText = escapeHtml(a.title || "Alert");
+          const url = (a.url || "").toString();
+          const titleHtml = url
+            ? `<a class="fw-semibold" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${titleText}</a>`
+            : `<span class="fw-semibold">${titleText}</span>`;
+
+          const matched = Array.isArray(a.matched) ? a.matched.slice(0, 6) : [];
+          const matchedHtml = matched.length
+            ? `<span class="d-inline-flex flex-wrap gap-1 ms-2">${matched
+                .map(
+                  (t) =>
+                    `<span class="badge bg-light text-dark border">${escapeHtml(t)}</span>`,
+                )
+                .join("")}</span>`
+            : "";
+          return `
+            <div class="critical-alert-item">
+              <div class="d-flex justify-content-between align-items-center">
+                <div class="d-flex align-items-center gap-2">
+                  <span class="badge ${badge}">${sev}</span>
+                  ${titleHtml}${matchedHtml}
+                </div>
+                ${ts}
+              </div>
+              <div class="text-muted">${escapeHtml(a.message || "")}</div>
+            </div>
+          `;
+        })
+        .join("");
+    }
+  } catch (error) {
+    console.error("Error updating critical monitor:", error);
+  }
+}
+
 // Refresh all data
 async function refreshDashboard() {
   await Promise.all([
@@ -285,6 +537,8 @@ async function refreshDashboard() {
     updateTrades(),
     updateBotStatus(),
     updateLiveTicker(),
+    updateDipSuggestions(),
+    updateCriticalMonitor(),
   ]);
 }
 

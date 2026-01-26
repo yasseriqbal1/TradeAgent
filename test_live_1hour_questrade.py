@@ -9,12 +9,97 @@ import numpy as np
 from datetime import datetime, timedelta, time
 import time as time_sleep
 import os
+import random
 from glob import glob
 from pathlib import Path
 import requests
 from dotenv import load_dotenv
 import json
 import redis
+
+try:
+    from zoneinfo import ZoneInfo
+except Exception:
+    ZoneInfo = None
+
+
+def get_now_eastern():
+    """Return current time in US/Eastern (handles DST when available)."""
+    if ZoneInfo is None:
+        return datetime.now()
+    return datetime.now(ZoneInfo("America/New_York"))
+
+
+def get_us_market_state(now=None):
+    """Return (is_open, reason, next_open_dt) for US equities regular session."""
+    if now is None:
+        now = get_now_eastern()
+    elif ZoneInfo is not None and now.tzinfo is None:
+        now = now.replace(tzinfo=ZoneInfo("America/New_York"))
+
+    session_open = time(9, 30)
+    session_close = time(16, 0)
+
+    # Weekend
+    if now.weekday() >= 5:
+        reason = "Weekend"
+    else:
+        # Holiday (best-effort)
+        is_holiday = False
+        try:
+            from pandas.tseries.holiday import USFederalHolidayCalendar
+
+            cal = USFederalHolidayCalendar()
+            is_holiday = len(cal.holidays(start=now.date(), end=now.date())) > 0
+        except Exception:
+            is_holiday = False
+
+        if is_holiday:
+            reason = "US market holiday"
+        elif now.time() < session_open:
+            reason = "Pre-market (before 9:30 AM ET)"
+        elif now.time() >= session_close:
+            reason = "After-hours (after 4:00 PM ET)"
+        else:
+            return True, "Market open", None
+
+    # Compute next open (ET)
+    next_day = now.date()
+    if now.time() < session_open and now.weekday() < 5:
+        candidate_ok = True
+        try:
+            from pandas.tseries.holiday import USFederalHolidayCalendar
+
+            cal = USFederalHolidayCalendar()
+            candidate_ok = len(cal.holidays(start=next_day, end=next_day)) == 0
+        except Exception:
+            candidate_ok = True
+
+        if candidate_ok:
+            if ZoneInfo is None:
+                next_open = datetime.combine(next_day, session_open)
+            else:
+                next_open = datetime.combine(next_day, session_open, tzinfo=ZoneInfo("America/New_York"))
+            return False, reason, next_open
+
+    while True:
+        next_day = next_day + timedelta(days=1)
+        if next_day.weekday() >= 5:
+            continue
+        try:
+            from pandas.tseries.holiday import USFederalHolidayCalendar
+
+            cal = USFederalHolidayCalendar()
+            if len(cal.holidays(start=next_day, end=next_day)) > 0:
+                continue
+        except Exception:
+            pass
+
+        if ZoneInfo is None:
+            next_open = datetime.combine(next_day, session_open)
+        else:
+            next_open = datetime.combine(next_day, session_open, tzinfo=ZoneInfo("America/New_York"))
+        return False, reason, next_open
 
 # Import existing modules
 from quant_agent.questrade_loader import QuestradeAPI
@@ -27,13 +112,39 @@ load_dotenv()
 ALPHAVANTAGE_API_KEY = os.getenv('ALPHAVANTAGE_API')
 
 # PAPER TRADING SAFETY FLAG
-PAPER_TRADING = True  # Set to False ONLY when ready for live money
+PAPER_TRADING = os.getenv('PAPER_TRADING', 'true').lower() in ('1', 'true', 'yes')  # Set to false ONLY when ready for live money
+
+# IMPORTANT SAFETY: This script's main loop is designed for paper execution.
+# Live order placement + fill/cancel handling is not implemented here, and the
+# exit logic would incorrectly assume fills and mutate "capital" without broker confirmation.
+# Use live_order_smoke_test.py for a one-off live order permission check.
+if not PAPER_TRADING:
+    raise SystemExit(
+        "REFUSING TO RUN IN LIVE MODE: test_live_1hour_questrade.py is paper-execution only. "
+        "Use live_order_smoke_test.py to validate live trading permissions safely."
+    )
+
+# Broker balance snapshot (USD) for dashboard display (Questrade)
+broker_cash = None
+broker_equity = None
+broker_buying_power = None
+broker_cash_cad = None
+broker_equity_cad = None
+broker_buying_power_cad = None
 
 # FRACTIONAL SHARES SUPPORT
 FRACTIONAL_SHARES_ENABLED = True  # Questrade supports fractional shares (US stocks only)
 
 # Configuration
 INITIAL_CAPITAL = 100000  # Fallback only - will be replaced with live balance
+
+# In paper mode, choose where the bot's working capital comes from.
+# - db: use last persisted paper cash balance (capital_after) from Postgres, else INITIAL_CAPITAL
+# - broker_cash: use broker cash (USD) from Questrade balances
+# - broker_equity: use broker equity (USD) from Questrade balances
+# - fixed: use PAPER_CAPITAL_FIXED
+PAPER_CAPITAL_SOURCE = os.getenv('PAPER_CAPITAL_SOURCE', 'db').strip().lower()
+PAPER_CAPITAL_FIXED = float(os.getenv('PAPER_CAPITAL_FIXED', str(INITIAL_CAPITAL)))
 MAX_POSITIONS = 3
 BASE_POSITION_SIZE_PCT = 0.25
 COMMISSION = 0.0  # Fractional shares are commission-free on Questrade!
@@ -61,7 +172,8 @@ COOLDOWN_MINUTES = 8  # Reduced from 15 for more opportunities
 COOLDOWN_AFTER_LOSS_MINUTES = 12  # Reduced from 20 - faster recovery attempts
 MIN_PRICE_CHANGE_PCT = 0.007  # 0.7% (reduced from 1%) - catch smaller moves
 MIN_MOMENTUM_REENTRY = 0.25  # Reduced from 0.35 - accept moderate signals
-MAX_DAILY_REENTRIES = 2  # Maximum times to re-enter same stock per day
+# Daily re-entry cap: set to 0 for unlimited re-entries.
+MAX_DAILY_REENTRIES = int(os.getenv('MAX_DAILY_REENTRIES', '0'))
 
 # Capital Constraints (for small accounts)
 MIN_ACCOUNT_BALANCE = 80.0  # Refuse to trade below this (USD)
@@ -80,6 +192,7 @@ SPY_MA_PERIOD = 200  # SPY 200-day moving average
 CHECK_INTERVAL_SECONDS = 10  # Check every 10 seconds (6x per minute)
 RUN_CONTINUOUS = True  # Set to False for timed tests
 REMOTE_STOP_FILE = "logs/STOP_TRADING.txt"  # Create this file to stop trading gracefully
+MAX_RUNTIME_MINUTES = float(os.getenv("MAX_RUNTIME_MINUTES", "0"))  # 0 = run until stopped
 
 # FEATURE #2: Time-of-Day Trading Window (avoid chaotic open/close)
 # First 5 min: fake breakouts, wide spreads, stop hunts
@@ -91,9 +204,24 @@ TRADING_END_TIME = (15, 55)   # Stop new entries at 3:55 PM EST (5 min before cl
 # Prevents disaster: Gap moves that ignore stop losses
 EARNINGS_BLACKOUT_MINUTES = 30  # Block trades ±30 minutes around earnings
 
-# n8n Webhook Configuration
-N8N_WEBHOOK_ENABLED = True
-N8N_WEBHOOK_URL = "http://localhost:5678/webhook/trade-alerts"
+# n8n Webhook Configuration (no hardcoded URLs)
+N8N_WEBHOOK_URL = os.getenv("N8N_WEBHOOK_URL", "")
+N8N_WEBHOOK_ENABLED = os.getenv("N8N_WEBHOOK_ENABLED", "true").lower() in ("1", "true", "yes") and bool(N8N_WEBHOOK_URL)
+
+# Paper execution realism
+SLIPPAGE_BPS = float(os.getenv("PAPER_SLIPPAGE_BPS", "2"))  # 2 bps default
+PAPER_FILL_DELAY_PROB = float(os.getenv("PAPER_FILL_DELAY_PROB", "0"))
+PAPER_PARTIAL_FILL_PROB = float(os.getenv("PAPER_PARTIAL_FILL_PROB", "0"))
+PAPER_PARTIAL_FILL_MIN_PCT = float(os.getenv("PAPER_PARTIAL_FILL_MIN_PCT", "0.5"))
+PAPER_RANDOM_SEED = os.getenv("PAPER_RANDOM_SEED", "")
+DEFAULT_SPREAD_PCT = float(os.getenv("DEFAULT_SPREAD_PCT", "0.002"))
+
+# Quote staleness protection
+QUOTE_STALE_SECONDS = int(os.getenv("QUOTE_STALE_SECONDS", "20"))
+
+# Dollar-risk budgeting for small accounts
+MAX_DAILY_LOSS_USD = float(os.getenv("MAX_DAILY_LOSS_USD", "5.0"))
+RISK_PER_TRADE_USD = float(os.getenv("RISK_PER_TRADE_USD", "0.75"))
 
 # Expanded 55-Stock Universe (Diversified across sectors)
 TRADING_UNIVERSE = [
@@ -134,6 +262,147 @@ timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
 log_dir = Path("logs")
 log_dir.mkdir(exist_ok=True)
 log_file = log_dir / f"trades_log_{timestamp}.txt"
+
+# Deterministic RNG for paper fills (optional)
+paper_rng = random.Random()
+if PAPER_RANDOM_SEED:
+    paper_rng.seed(PAPER_RANDOM_SEED)
+
+# Questrade symbol cache
+symbol_id_cache = {}
+symbol_cache_last_refresh = None
+SYMBOL_CACHE_REFRESH_MINUTES = int(os.getenv("SYMBOL_CACHE_REFRESH_MINUTES", "1440"))
+
+
+def build_symbol_id_cache(tickers, force=False):
+    """Cache Questrade symbol IDs to avoid repeated searches."""
+    global symbol_id_cache, symbol_cache_last_refresh
+
+    now = datetime.now()
+    if not force and symbol_cache_last_refresh:
+        age_minutes = (now - symbol_cache_last_refresh).total_seconds() / 60
+        if age_minutes < SYMBOL_CACHE_REFRESH_MINUTES:
+            return
+
+    missing = [t for t in tickers if t not in symbol_id_cache]
+    if not missing and not force:
+        return
+
+    log_message(f"   🔎 Caching Questrade symbol IDs for {len(missing)} tickers...")
+    for ticker in missing:
+        try:
+            symbol_id = questrade.search_symbols(ticker)
+            if symbol_id:
+                symbol_id_cache[ticker] = symbol_id
+            else:
+                log_message(f"   ⚠️  {ticker}: Symbol not found on Questrade", False)
+        except Exception as e:
+            log_message(f"   ⚠️  {ticker}: Symbol search failed ({str(e)[:50]})", False)
+
+    symbol_cache_last_refresh = now
+
+
+def parse_quote_timestamp(quote):
+    """Parse available quote timestamp into a datetime, if present."""
+    for key in ("lastTradeTime", "quoteTime", "lastTradeDateTime", "lastTradeDateTimeUtc"):
+        ts = quote.get(key)
+        if not ts:
+            continue
+        try:
+            ts_clean = ts.replace("Z", "+00:00")
+            return datetime.fromisoformat(ts_clean)
+        except Exception:
+            continue
+    return None
+
+
+def compute_mark_price(quote):
+    """Compute mark price from bid/ask/last."""
+    bid = quote.get("bidPrice") or 0
+    ask = quote.get("askPrice") or 0
+    last = quote.get("lastTradePrice") or 0
+    if bid > 0 and ask > 0:
+        return (bid + ask) / 2
+    if last > 0:
+        return last
+    if bid > 0:
+        return bid
+    if ask > 0:
+        return ask
+    return None
+
+
+def is_quote_stale(quote, now=None, max_age_seconds=QUOTE_STALE_SECONDS):
+    """Return (is_stale, age_seconds). If no timestamp, treat as stale."""
+    if not quote:
+        return True, None
+    if not now:
+        now = datetime.now()
+    ts = quote.get("timestamp")
+    if not ts:
+        ts = parse_quote_timestamp(quote)
+    if not ts:
+        return True, None
+    if ts.tzinfo is not None:
+        now = datetime.now(ts.tzinfo)
+    age_seconds = (now - ts).total_seconds()
+    return age_seconds > max_age_seconds, age_seconds
+
+
+def simulate_paper_fill(ticker, side, shares, quote_data, allow_partial=True):
+    """Simulate paper fill using bid/ask and slippage. Returns (filled_shares, fill_price, note) or (None, None, reason)."""
+    if not quote_data:
+        return None, None, "Missing quote data"
+
+    bid = quote_data.get("bidPrice") or 0
+    ask = quote_data.get("askPrice") or 0
+    last = quote_data.get("lastTradePrice") or 0
+
+    # Delayed fill simulation (optional)
+    if PAPER_FILL_DELAY_PROB > 0 and paper_rng.random() < PAPER_FILL_DELAY_PROB:
+        return None, None, "Delayed fill (simulated)"
+
+    # Determine base price
+    if side == "BUY":
+        if ask > 0:
+            base_price = ask
+        elif last > 0:
+            spread = max(last * DEFAULT_SPREAD_PCT, 0)
+            base_price = last + (spread / 2)
+        else:
+            return None, None, "Missing ask/last for BUY"
+        slippage = base_price * (SLIPPAGE_BPS / 10000)
+        fill_price = base_price + slippage
+    else:
+        if bid > 0:
+            base_price = bid
+        elif last > 0:
+            spread = max(last * DEFAULT_SPREAD_PCT, 0)
+            base_price = last - (spread / 2)
+        else:
+            return None, None, "Missing bid/last for SELL"
+        slippage = base_price * (SLIPPAGE_BPS / 10000)
+        fill_price = max(base_price - slippage, 0)
+
+    filled_shares = shares
+    note = "Fill"
+
+    # Partial fill simulation (optional)
+    if allow_partial and PAPER_PARTIAL_FILL_PROB > 0 and paper_rng.random() < PAPER_PARTIAL_FILL_PROB:
+        partial_pct = min(max(PAPER_PARTIAL_FILL_MIN_PCT, 0.1), 0.9)
+        fill_fraction = paper_rng.uniform(partial_pct, 0.9)
+        filled_shares = shares * fill_fraction
+        note = f"Partial fill ({fill_fraction:.0%})"
+
+    if not FRACTIONAL_SHARES_ENABLED:
+        filled_shares = int(filled_shares)
+
+    if filled_shares <= 0:
+        return None, None, "Partial fill too small"
+
+    return filled_shares, fill_price, note
+
+
 
 def log_message(message, print_too=True):
     """Write message to log file and optionally print"""
@@ -337,31 +606,82 @@ def log_trade_to_db(ticker, action, shares, price, capital_before, total_positio
     conn = get_db_connection()
     if not conn:
         return False
-    
+
     try:
-        total_value = shares * price
-        capital_after = capital_before - total_value if action == 'BUY' else capital_before + total_value
-        
+        total_value = float(shares) * float(price)
+        if action == 'BUY':
+            capital_after = float(capital_before) - total_value
+        else:
+            capital_after = float(capital_before) + total_value
+
         with conn.cursor() as cur:
-            cur.execute("""
+            cur.execute(
+                """
                 INSERT INTO trades_history 
                 (ticker, action, shares, price, total_value, 
                  exit_reason, entry_price, hold_duration_minutes, pnl, pnl_pct,
                  capital_before, capital_after, total_positions, notes)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """, (
-                ticker, action, shares, price, total_value,
-                exit_reason, entry_price, hold_minutes, pnl, pnl_pct,
-                capital_before, capital_after, total_positions, notes
-            ))
+                """,
+                (
+                    ticker,
+                    action,
+                    shares,
+                    price,
+                    total_value,
+                    exit_reason,
+                    entry_price,
+                    hold_minutes,
+                    pnl,
+                    pnl_pct,
+                    capital_before,
+                    capital_after,
+                    total_positions,
+                    notes,
+                ),
+            )
             conn.commit()
         conn.close()
         return True
     except Exception as e:
         log_message(f"   ⚠️ Failed to log trade to history: {str(e)[:100]}", False)
-        if conn:
+        try:
             conn.close()
+        except Exception:
+            pass
         return False
+
+def load_last_capital_after_from_db(fallback_capital: float) -> float:
+    """Load last known paper-trading cash balance from trades_history.
+
+    In PAPER_TRADING mode, broker balances are not authoritative because positions
+    are tracked in Postgres. We persist cash via capital_after on each trade.
+    """
+    conn = get_db_connection()
+    if not conn:
+        return float(fallback_capital)
+
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT capital_after
+                FROM trades_history
+                WHERE capital_after IS NOT NULL
+                ORDER BY trade_date DESC
+                LIMIT 1
+            """)
+            row = cur.fetchone()
+        conn.close()
+        if row and row[0] is not None:
+            return float(row[0])
+        return float(fallback_capital)
+    except Exception as e:
+        log_message(f"   ⚠️ Failed to load last capital from DB: {str(e)[:100]}", False)
+        try:
+            conn.close()
+        except Exception:
+            pass
+        return float(fallback_capital)
 
 # Trading mode indicator
 trading_mode = "🧪 PAPER TRADING MODE" if PAPER_TRADING else "💰 LIVE TRADING MODE"
@@ -369,33 +689,17 @@ trading_mode = "🧪 PAPER TRADING MODE" if PAPER_TRADING else "💰 LIVE TRADIN
 print_header(f"🔴 LIVE TRADING - QUESTRADE - {trading_mode}")
 
 # PRE-FLIGHT CHECK #1: Weekend Check
-today = datetime.now()
-if today.weekday() >= 5:  # Saturday = 5, Sunday = 6
-    weekday_name = "Saturday" if today.weekday() == 5 else "Sunday"
-    log_message(f"\n🚫 WEEKEND DETECTED: Today is {weekday_name}")
-    log_message("   Markets are closed on weekends")
-    log_message("   Next trading day: Monday 9:30 AM EST\n")
-    exit(0)
-
-# PRE-FLIGHT CHECK #2: Trading Hours (9:30 AM - 4:00 PM EST)
-current_hour = today.hour
-current_minute = today.minute
-market_open_hour = 9
-market_open_minute = 30
-market_close_hour = 16
-
-if current_hour < market_open_hour or (current_hour == market_open_hour and current_minute < market_open_minute):
-    log_message(f"\n⏰ MARKET NOT YET OPEN")
-    log_message(f"   Current time: {today.strftime('%I:%M %p EST')}")
-    log_message(f"   Market opens at: 9:30 AM EST")
-    log_message(f"   Please start the script after market open\n")
-    exit(0)
-elif current_hour >= market_close_hour:
-    log_message(f"\n🔴 MARKET ALREADY CLOSED")
-    log_message(f"   Current time: {today.strftime('%I:%M %p EST')}")
-    log_message(f"   Market closed at: 4:00 PM EST")
-    log_message(f"   Next trading day: Tomorrow 9:30 AM EST\n")
-    exit(0)
+today = get_now_eastern()
+is_open_now, market_reason, next_open_dt = get_us_market_state(today)
+if not is_open_now:
+    log_message(f"\n⛔ MARKET CLOSED: {market_reason}")
+    log_message(f"   Current time (ET): {today.strftime('%I:%M %p')}")
+    if next_open_dt is not None:
+        log_message(f"   Next open: {next_open_dt.strftime('%a %m/%d %I:%M %p ET')}")
+    if os.getenv('EXIT_IF_MARKET_CLOSED', '0') == '1':
+        log_message("   EXIT_IF_MARKET_CLOSED=1 -> exiting\n")
+        exit(0)
+    log_message("   Bot will idle until market opens (no entries will be placed).\n")
 
 # Initialize
 start_time = datetime.now()
@@ -418,6 +722,17 @@ TOKEN_REFRESH_INTERVAL_MINUTES = 25  # Refresh before 30-min expiry
 
 # Last known prices fallback (for API failures)
 last_known_prices = {}  # Store last successful price fetch
+last_known_quotes = {}  # Store last successful quote map
+last_quote_fetch_error = None  # Last known quote-fetch error for dashboard/status
+
+# Quote freshness / feed-degraded counters (reported EOD + optionally via dashboard status)
+trade_block_stats = {
+    'entries_paused_cache_cycles': 0,
+    'entries_paused_stale_positions_cycles': 0,
+    'entry_block_missing_quote': 0,
+    'entry_block_stale_quote': 0,
+    'exit_block_stale_or_missing_quote': 0,
+}
 
 log_message(f"\n⏰ Start Time: {start_time.strftime('%I:%M:%S %p EST')}")
 log_message(f"🎚️ Trading Mode: {trading_mode}")
@@ -439,6 +754,9 @@ try:
     log_message(f"   Server: {questrade.api_server}")
     log_message(f"   Mode: {questrade.server_type}")
     log_message(f"   Token will auto-refresh every {TOKEN_REFRESH_INTERVAL_MINUTES} minutes")
+
+    # Build symbol cache once at startup
+    build_symbol_id_cache(TRADING_UNIVERSE, force=True)
 except Exception as e:
     error_msg = f"Failed to connect to Questrade: {str(e)}"
     log_message(f"❌ {error_msg}")
@@ -469,11 +787,33 @@ try:
     live_cash = live_cash_cad * USD_CAD_RATE
     live_equity = live_equity_cad * USD_CAD_RATE
     buying_power = buying_power_cad * USD_CAD_RATE
+
+    # Persist broker snapshot for dashboard
+    broker_cash_cad = live_cash_cad
+    broker_equity_cad = live_equity_cad
+    broker_buying_power_cad = buying_power_cad
+    broker_cash = live_cash
+    broker_equity = live_equity
+    broker_buying_power = buying_power
     
-    # Use live equity as starting capital
-    capital = live_equity
-    starting_equity = live_equity
-    daily_start_equity = live_equity  # Set daily starting point
+    # Set working capital / equity base
+    if PAPER_TRADING:
+        if PAPER_CAPITAL_SOURCE in ('broker', 'broker_cash'):
+            capital = live_cash
+        elif PAPER_CAPITAL_SOURCE == 'broker_equity':
+            capital = live_equity
+        elif PAPER_CAPITAL_SOURCE == 'fixed':
+            capital = float(PAPER_CAPITAL_FIXED)
+        else:
+            # Default: pull last known paper cash from DB (falls back to INITIAL_CAPITAL)
+            capital = load_last_capital_after_from_db(INITIAL_CAPITAL)
+        starting_equity = capital
+        daily_start_equity = capital
+    else:
+        # For live trading, treat cash as available buying capital.
+        capital = live_cash
+        starting_equity = live_equity
+        daily_start_equity = live_equity  # Set daily starting point
     
     log_message(f"   💵 Cash: CAD ${live_cash_cad:,.2f} (USD ${live_cash:,.2f})")
     log_message(f"   📈 Total Equity: CAD ${live_equity_cad:,.2f} (USD ${live_equity:,.2f})")
@@ -502,8 +842,18 @@ except Exception as e:
     log_message(f"❌ {error_msg}")
     log_message(f"   Using fallback capital: ${INITIAL_CAPITAL:,}")
     send_error_alert("Balance Fetch Failed", error_msg, critical=False)
-    capital = INITIAL_CAPITAL
-    starting_equity = INITIAL_CAPITAL
+    if PAPER_TRADING and PAPER_CAPITAL_SOURCE == 'fixed':
+        capital = float(PAPER_CAPITAL_FIXED)
+    else:
+        capital = load_last_capital_after_from_db(INITIAL_CAPITAL) if PAPER_TRADING else INITIAL_CAPITAL
+    starting_equity = capital
+
+    broker_cash = None
+    broker_equity = None
+    broker_buying_power = None
+    broker_cash_cad = None
+    broker_equity_cad = None
+    broker_buying_power_cad = None
 
 # Load historical data for momentum calculation
 print_header("📊 LOADING HISTORICAL DATA")
@@ -523,25 +873,65 @@ log_message(f"\n✅ Loaded {len(historical_data)} stocks")
 # PRE-FLIGHT SAFETY CHECK #2: Data freshness
 try:
     most_recent_date = max([df.index[-1] for df in historical_data.values()])
-    data_age_days = (datetime.now() - most_recent_date).days
-    
-    # Allow up to 4 days to account for weekends (Friday → Monday = 3 days)
-    if data_age_days > 4:
-        error_msg = f"Historical data is {data_age_days} days old (last: {most_recent_date.date()})"
+    today = datetime.now().date()
+    last_data_date = most_recent_date.date()
+    data_age_days = (today - last_data_date).days
+
+    # Use business days so long weekends/US market holidays do not cause false alarms
+    business_days_since = None
+    try:
+        from pandas.tseries.holiday import USFederalHolidayCalendar
+        from pandas.tseries.offsets import CustomBusinessDay
+
+        cbd = CustomBusinessDay(calendar=USFederalHolidayCalendar())
+        business_days_since = len(pd.date_range(last_data_date + timedelta(days=1), today, freq=cbd))
+    except Exception:
+        business_days_since = None
+
+    # Defaults are intentionally tolerant to long weekends/holidays.
+    max_calendar_gap = int(os.getenv('MAX_HISTORICAL_DATA_CALENDAR_DAYS', '7'))
+    max_business_gap = int(os.getenv('MAX_HISTORICAL_DATA_BUSINESS_DAYS', '4'))
+
+    too_old = False
+    if business_days_since is not None:
+        too_old = business_days_since > max_business_gap
+    else:
+        too_old = data_age_days > max_calendar_gap
+
+    if too_old:
+        age_detail = f"{data_age_days} calendar days"
+        if business_days_since is not None:
+            age_detail += f" / {business_days_since} business days"
+        error_msg = f"Historical data is {age_detail} old (last: {last_data_date})"
         log_message(f"\n🚨 SAFETY CHECK FAILED: {error_msg}")
         log_message("   Run download_historical_data.py to update data before trading")
         send_error_alert("Stale Data Detected", error_msg, critical=True)
         exit(1)
-    
-    log_message(f"   ✅ Data freshness check passed (last update: {most_recent_date.date()}, {data_age_days} days old)")
+
+    freshness_note = f"{data_age_days} days old"
+    if business_days_since is not None:
+        freshness_note += f" / {business_days_since} business days"
+    log_message(f"   ✅ Data freshness check passed (last update: {last_data_date}, {freshness_note})")
 except Exception as e:
     log_message(f"⚠️ Could not verify data freshness: {str(e)}")
 
 # Load existing positions from database
 log_message("\n💾 Loading positions from database...")
 positions = load_positions_from_db()
+starting_positions_count = len(positions)
 trades = []
 checks = 0
+
+# In paper trading, compute an equity baseline using persisted cash + loaded positions.
+# This prevents double-counting and makes session P&L truthful across restarts.
+if PAPER_TRADING and starting_positions_count:
+    positions_value = 0.0
+    for _ticker, _pos in positions.items():
+        px = float(_pos.get('current_price') or _pos.get('entry_price') or 0.0)
+        positions_value += float(_pos.get('shares') or 0.0) * px
+    starting_equity = float(capital) + positions_value
+    daily_start_equity = starting_equity
+    log_message(f"   🧾 Paper baseline: Cash ${capital:,.2f} + Positions ${positions_value:,.2f} = Equity ${starting_equity:,.2f}")
 
 if positions:
     log_message(f"   📁 Found {len(positions)} open positions:")
@@ -619,67 +1009,66 @@ def calculate_momentum_score(df, current_price=None):
     
     return momentum, volume_ratio, volatility
 
+
 def get_current_prices_questrade(tickers):
-    """Get current prices from Questrade"""
+    """Get current prices and full quotes from Questrade."""
+    global last_quote_fetch_error
     prices = {}
+    quote_map = {}
     errors = []
-    
+
+    # Reset per-call
+    last_quote_fetch_error = None
+
     try:
-        # Get symbol IDs first
-        symbol_ids = {}
-        for ticker in tickers:
-            try:
-                # Search for symbol ID
-                symbol_id = questrade.search_symbols(ticker)
-                if symbol_id:
-                    # Found the symbol
-                    symbol_ids[ticker] = symbol_id
-                else:
-                    # Symbol not found, log it
-                    errors.append(f"{ticker}: Not found on Questrade")
-            except Exception as e:
-                error_msg = f"{ticker}: Search error - {str(e)[:50]}"
-                errors.append(error_msg)
-                # Alert on timeout or connection errors
-                if "timeout" in str(e).lower() or "connection" in str(e).lower():
-                    send_error_alert("API Search Error", error_msg, critical=False)
-        
-        # Log search results
+        # Ensure symbol cache is populated
+        build_symbol_id_cache(tickers)
+
+        symbol_ids = {t: sid for t, sid in symbol_id_cache.items() if t in tickers}
         if len(symbol_ids) == 0:
-            error_msg = "No symbols found on Questrade - check API access"
+            error_msg = "No cached symbols found on Questrade - check API access"
+            last_quote_fetch_error = error_msg
             log_message(f"   ⚠️  {error_msg}", False)
-            if errors[:3]:  # Show first 3 errors
-                for err in errors[:3]:
-                    log_message(f"      - {err}", False)
-            send_error_alert("Symbol Lookup Failed", f"{error_msg}. Errors: {len(errors)}", critical=True)
-            return prices
-        
+            send_error_alert("Symbol Lookup Failed", error_msg, critical=True)
+            return prices, quote_map
+
         # Get quotes for all symbols
-        if symbol_ids:
-            try:
-                symbol_id_list = list(symbol_ids.values())
-                quotes = questrade.get_quotes(symbol_id_list)
-                
-                # Map back to tickers
-                id_to_ticker = {v: k for k, v in symbol_ids.items()}
-                for quote in quotes:
-                    ticker = id_to_ticker.get(quote['symbolId'])
-                    if ticker:
-                        # Use lastTradePrice or bidPrice as current price
-                        price = quote.get('lastTradePrice') or quote.get('bidPrice')
-                        if price:
-                            prices[ticker] = float(price)
-            except Exception as e:
-                error_msg = f"Quote fetch failed: {str(e)[:100]}"
-                log_message(f"⚠️  {error_msg}", False)
-                send_error_alert("API Quote Error", error_msg, critical=True)
-                
+        try:
+            symbol_id_list = list(symbol_ids.values())
+            quotes = questrade.get_quotes(symbol_id_list)
+
+            id_to_ticker = {v: k for k, v in symbol_ids.items()}
+            for quote in quotes:
+                ticker = id_to_ticker.get(quote.get('symbolId'))
+                if not ticker:
+                    continue
+
+                quote_data = {
+                    'lastTradePrice': quote.get('lastTradePrice'),
+                    'bidPrice': quote.get('bidPrice'),
+                    'askPrice': quote.get('askPrice'),
+                    'volume': quote.get('volume'),
+                    'timestamp': parse_quote_timestamp(quote)
+                }
+                quote_map[ticker] = quote_data
+
+                mark_price = compute_mark_price(quote_data)
+                if mark_price is not None:
+                    prices[ticker] = float(mark_price)
+
+        except Exception as e:
+            error_msg = f"Quote fetch failed: {str(e)[:100]}"
+            last_quote_fetch_error = error_msg
+            log_message(f"⚠️  {error_msg}", False)
+            send_error_alert("API Quote Error", error_msg, critical=True)
+
     except Exception as e:
         error_msg = f"Error fetching prices: {str(e)[:100]}"
+        last_quote_fetch_error = error_msg
         log_message(f"⚠️  {error_msg}", False)
         send_error_alert("Price Fetch Failed", error_msg, critical=True)
-    
-    return prices
+
+    return prices, quote_map
 
 def check_market_regime():
     """Check if market conditions are safe for trading (VIX < 35, SPY above 200MA)"""
@@ -695,13 +1084,20 @@ def check_liquidity(ticker, quote_data):
     """Check if stock has sufficient liquidity (dollar volume > $5M, spread < 0.5%)"""
     try:
         # Get bid/ask from quote
-        bid = quote_data.get('bidPrice', 0)
-        ask = quote_data.get('askPrice', 0)
-        last_price = quote_data.get('lastTradePrice', 0)
-        volume = quote_data.get('volume', 0)
-        
-        # Calculate dollar volume (rough estimate using last price)
-        dollar_volume = volume * last_price
+        if not quote_data:
+            return False, "Missing quote data"
+
+        bid = quote_data.get('bidPrice') or 0
+        ask = quote_data.get('askPrice') or 0
+        last_price = quote_data.get('lastTradePrice') or 0
+        volume = quote_data.get('volume') or 0
+
+        mark_price = compute_mark_price(quote_data)
+        if not mark_price or volume <= 0:
+            return False, "Missing price/volume for liquidity"
+
+        # Calculate dollar volume (rough estimate using mark price)
+        dollar_volume = volume * mark_price
         
         # Calculate bid-ask spread percentage
         if bid > 0 and ask > 0:
@@ -809,7 +1205,7 @@ def is_within_trading_window():
     Returns:
         (is_valid, reason): Tuple of boolean and explanation string
     """
-    now = datetime.now()
+    now = get_now_eastern()
     current_time = now.time()
     
     # Unpack trading window times
@@ -912,17 +1308,28 @@ def check_earnings_blackout(ticker):
         log_message(f"   ⚠️ Earnings check error for {ticker}: {str(e)}")
         return False, f"Check failed: {str(e)} (allowing trade)"
 
-def check_positions(current_prices):
+def check_positions(current_prices, quote_map=None):
     """Check existing positions for exits"""
     global capital, positions, trades, consecutive_losses, total_closed_trades
     global last_sell_times, last_sell_prices, last_sell_was_loss, daily_reentry_count  # Add cooldown tracking
+    global trade_block_stats
     
     exits = []
     for ticker, pos in list(positions.items()):
-        if ticker not in current_prices:
+        quote_data = quote_map.get(ticker) if quote_map else None
+        is_stale, age_seconds = is_quote_stale(quote_data)
+        if is_stale:
+            age_msg = "no timestamp" if age_seconds is None else f"{age_seconds:.0f}s old"
+            log_message(f"   🚫 {ticker}: Exit checks paused (stale/missing quote: {age_msg})", False)
+            trade_block_stats['exit_block_stale_or_missing_quote'] += 1
             continue
-            
-        current_price = current_prices[ticker]
+
+        current_price = compute_mark_price(quote_data)
+        if current_price is None:
+            if ticker not in current_prices:
+                log_message(f"   ⚠️ {ticker}: No mark price + no fallback price; skipping exit checks", False)
+                continue
+            current_price = current_prices[ticker]
         
         # Update highest price and trailing stop
         if current_price > pos['highest_price']:
@@ -942,6 +1349,14 @@ def check_positions(current_prices):
     # Execute exits
     for ticker, exit_price, reason in exits:
         pos = positions[ticker]
+        if PAPER_TRADING:
+            quote_data = quote_map.get(ticker) if quote_map else None
+            filled_shares, fill_price, fill_note = simulate_paper_fill(ticker, "SELL", pos['shares'], quote_data, allow_partial=False)
+            if fill_price:
+                exit_price = fill_price
+            else:
+                log_message(f"   ⚠️ {ticker}: Exit fill fallback to mark ({fill_note})", False)
+
         exit_value = pos['shares'] * exit_price - COMMISSION
         capital += exit_value
         
@@ -1025,9 +1440,76 @@ def check_positions(current_prices):
         del positions[ticker]
         delete_position_from_db(ticker)
 
-def scan_and_trade(historical_data, current_prices, available_capital):
+def calculate_unrealized_pnl(current_prices):
+    """Calculate unrealized P&L for open positions."""
+    total = 0.0
+    for ticker, pos in positions.items():
+        price = current_prices.get(ticker, pos['entry_price'])
+        total += pos['shares'] * (price - pos['entry_price'])
+    return total
+
+def publish_bot_status(current_prices, breakers=None):
+    """Publish bot status to Redis for dashboard truthfulness."""
+    try:
+        r = redis.Redis(
+            host=os.getenv('REDIS_HOST', 'localhost'),
+            port=int(os.getenv('REDIS_PORT', '6379')),
+            decode_responses=True,
+        )
+
+        realized_pnl = sum(t.get('pnl', 0) for t in trades if t.get('action') == 'SELL')
+        unrealized_pnl = calculate_unrealized_pnl(current_prices)
+        paper_equity = capital + sum(
+            pos['shares'] * current_prices.get(t, pos['entry_price'])
+            for t, pos in positions.items()
+        )
+
+        have_broker_equity = broker_equity is not None and float(broker_equity) > 0
+        have_broker_cash = broker_cash is not None and float(broker_cash) >= 0
+
+        # IMPORTANT: In paper mode, the bot's 'equity'/'cash' should reflect paper accounting.
+        # Broker balances (often ~10k in practice accounts) are informational only.
+        if PAPER_TRADING:
+            equity_source = 'paper'
+            cash_source = 'paper'
+            display_equity = float(paper_equity)
+            display_cash = float(capital)
+        else:
+            equity_source = 'broker' if have_broker_equity else 'paper'
+            cash_source = 'broker' if have_broker_cash else 'paper'
+            display_equity = float(broker_equity) if have_broker_equity else float(paper_equity)
+            display_cash = float(broker_cash) if have_broker_cash else float(capital)
+
+        status = {
+            'timestamp': datetime.now().isoformat(),
+            'mode': 'paper' if PAPER_TRADING else 'live',
+            'equity_source': equity_source,
+            'cash_source': cash_source,
+            'cash': round(display_cash, 4),
+            'equity': round(display_equity, 4),
+            'paper_cash': round(float(capital), 4),
+            'paper_equity': round(float(paper_equity), 4),
+            'broker_cash': round(float(broker_cash), 4) if have_broker_cash else None,
+            'broker_equity': round(float(broker_equity), 4) if have_broker_equity else None,
+            'daily_start_equity': round(daily_start_equity, 4),
+            'realized_pnl': round(realized_pnl, 4),
+            'unrealized_pnl': round(unrealized_pnl, 4),
+            'open_positions': len(positions),
+            'breakers': breakers or {}
+        }
+
+        payload = json.dumps(status)
+        # Legacy key (older dashboards) + v2 key (preferred)
+        r.setex('bot_status', 120, payload)
+        r.setex('bot_status_v2', 120, payload)
+    except Exception:
+        # Silent fail to avoid disrupting trading
+        pass
+
+def scan_and_trade(historical_data, current_prices, quote_map, available_capital):
     """Scan for opportunities and enter trades"""
     global capital, positions, consecutive_losses, market_regime_ok, starting_equity
+    global trade_block_stats
     
     # FEATURE #2: Time-of-Day Trading Window Check
     is_valid_time, time_reason = is_within_trading_window()
@@ -1042,10 +1524,16 @@ def scan_and_trade(historical_data, current_prices, available_capital):
         send_error_alert("Consecutive Losses", f"{consecutive_losses} losing trades in a row", critical=True)
         return
     
-    # CIRCUIT BREAKER 2: Check daily portfolio loss
+    # CIRCUIT BREAKER 2: Check daily portfolio loss (USD + percent)
     current_equity = capital + sum(pos['shares'] * current_prices.get(t, pos['entry_price']) 
                                    for t, pos in positions.items())
-    daily_loss_pct = (current_equity - daily_start_equity) / daily_start_equity
+    daily_loss_usd = current_equity - daily_start_equity
+    daily_loss_pct = (daily_loss_usd / daily_start_equity) if daily_start_equity > 0 else 0
+    if daily_loss_usd <= -MAX_DAILY_LOSS_USD:
+        log_message(f"\n🚨 CIRCUIT BREAKER: Daily loss ${daily_loss_usd:,.2f} <= -${MAX_DAILY_LOSS_USD:,.2f}", False)
+        log_message(f"   Trading paused for today", False)
+        send_error_alert("Daily Loss Limit", f"Portfolio down ${daily_loss_usd:,.2f}", critical=True)
+        return
     if daily_loss_pct <= -MAX_DAILY_LOSS_PCT:
         log_message(f"\n🚨 CIRCUIT BREAKER: Daily loss {daily_loss_pct*100:.1f}% >= {MAX_DAILY_LOSS_PCT*100:.0f}%", False)
         log_message(f"   Trading paused for today", False)
@@ -1137,7 +1625,10 @@ def scan_and_trade(historical_data, current_prices, available_capital):
     available_slots = MAX_POSITIONS - len(positions)
     
     for ticker, score in top_stocks[:available_slots]:
-        current_price = current_prices[ticker]
+        current_price = current_prices.get(ticker)
+        if not current_price:
+            log_message(f"   🚫 {ticker}: Missing current price", False)
+            continue
         
         # ===== RE-ENTRY COOLDOWN CHECKS =====
         
@@ -1162,9 +1653,9 @@ def scan_and_trade(historical_data, current_prices, available_capital):
                 log_message(f"   🚫 {ticker}: Momentum too low for re-entry ({score:.4f} < {MIN_MOMENTUM_REENTRY})", False)
                 continue
         
-        # Check 3: Daily re-entry limit (max 2 times per day)
+        # Check 3: Daily re-entry limit (optional)
         daily_count = daily_reentry_count.get(ticker, 0)
-        if daily_count >= MAX_DAILY_REENTRIES:
+        if MAX_DAILY_REENTRIES > 0 and daily_count >= MAX_DAILY_REENTRIES:
             log_message(f"   🚫 {ticker}: Max re-entries reached ({daily_count}/{MAX_DAILY_REENTRIES} today)", False)
             continue
         
@@ -1175,18 +1666,48 @@ def scan_and_trade(historical_data, current_prices, available_capital):
         if is_blocked:
             log_message(f"   🚫 {ticker}: {earnings_reason}", False)
             continue
-        
-        # Calculate position size (supports fractional shares!)
+
+        # Quote availability + staleness gate
+        quote_data = quote_map.get(ticker)
+        if not quote_data:
+            log_message(f"   🚫 {ticker}: Missing quote data", False)
+            trade_block_stats['entry_block_missing_quote'] += 1
+            continue
+
+        is_stale, age_seconds = is_quote_stale(quote_data)
+        if is_stale:
+            age_msg = f"{age_seconds:.0f}s" if age_seconds is not None else "unknown age"
+            log_message(f"   🚫 {ticker}: Stale quote ({age_msg})", False)
+            trade_block_stats['entry_block_stale_quote'] += 1
+            continue
+
+        # Liquidity/spread gate
+        is_liquid, liq_reason = check_liquidity(ticker, quote_data)
+        if not is_liquid:
+            log_message(f"   🚫 {ticker}: {liq_reason}", False)
+            continue
+
+        # Risk-based position sizing (primary limiter)
+        stop_loss_preview = current_price * (1 - STOP_LOSS_PCT)
+        risk_per_share = current_price - stop_loss_preview
+        if risk_per_share <= 0:
+            log_message(f"   🚫 {ticker}: Invalid risk per share", False)
+            continue
+
+        shares_by_risk = RISK_PER_TRADE_USD / risk_per_share
         max_position_value = capital * BASE_POSITION_SIZE_PCT
-        
+        shares_by_cap = max_position_value / current_price
+        shares = min(shares_by_risk, shares_by_cap)
+
         if FRACTIONAL_SHARES_ENABLED:
-            # Fractional shares: allocate exact dollar amount (commission-free)
-            shares = max_position_value / current_price
-            cost = shares * current_price  # No commission for fractional
+            cost = shares * current_price
         else:
-            # Whole shares: traditional calculation
-            shares = int((max_position_value - COMMISSION) / current_price)
+            shares = int(shares)
             cost = shares * current_price + COMMISSION
+
+        if shares <= 0 or cost <= 0:
+            log_message(f"   🚫 {ticker}: Position size too small after risk sizing", False)
+            continue
         
         # FEATURE #1: CRITICAL SAFETY CHECK - Validate position size before order
         is_valid, adjusted_max_value = validate_position_size(ticker, shares, current_price, capital)
@@ -1211,83 +1732,87 @@ def scan_and_trade(historical_data, current_prices, available_capital):
         # Ensure we have at least a minimum position
         if cost >= 1.0 and cost <= capital * 0.85:
             # Only use 85% of capital to leave buffer
-                
-                # PAPER TRADING: Simulate fill, LIVE TRADING: Place actual order
-                if PAPER_TRADING:
-                    # Paper mode - instant fill at current price
-                    fill_price = current_price
-                    log_message(f"   🧪 Paper trade: Simulated fill at ${fill_price:.2f}")
-                else:
-                    # LIVE MODE - Place actual limit order (NOT IMPLEMENTED YET)
-                    log_message(f"   ⚠️ LIVE ORDER EXECUTION NOT YET IMPLEMENTED")
-                    log_message(f"   Set PAPER_TRADING=True to simulate")
+
+            # PAPER TRADING: Simulate fill, LIVE TRADING: Place actual order
+            if PAPER_TRADING:
+                filled_shares, fill_price, fill_note = simulate_paper_fill(ticker, "BUY", shares, quote_data)
+                if not fill_price:
+                    log_message(f"   🚫 {ticker}: Paper fill skipped ({fill_note})", False)
                     continue
-                
-                capital -= cost
-                
-                # Dynamic take profit based on stock price
-                take_profit_pct = HIGH_PRICE_TAKE_PROFIT_PCT if fill_price > HIGH_PRICE_THRESHOLD else TAKE_PROFIT_PCT
-                
-                positions[ticker] = {
-                    'shares': shares,
-                    'entry_price': fill_price,
-                    'entry_date': datetime.now(),
-                    'entry_time': datetime.now(),
-                    'highest_price': fill_price,
-                    'stop_loss': fill_price * (1 - STOP_LOSS_PCT),
-                    'take_profit': fill_price * (1 + take_profit_pct),
-                    'trailing_stop': fill_price * (1 - TRAILING_STOP_PCT),
-                    'current_price': fill_price,
-                    'unrealized_pnl': 0,
-                    'unrealized_pnl_pct': 0
-                }
-                
-                # Save position to database
-                save_position_to_db(ticker, positions[ticker])
-                
-                # Log trade to history
-                log_trade_to_db(
-                    ticker=ticker,
-                    action='BUY',
-                    shares=shares,
-                    price=fill_price,
-                    capital_before=capital + cost,  # Capital before this buy
-                    total_positions=len(positions),
-                    notes=f"Momentum score: {score:.4f}"
-                )
-                
-                trade = {
-                    'time': datetime.now().strftime('%I:%M:%S %p'),
-                    'action': 'BUY',
-                    'ticker': ticker,
-                    'price': fill_price,
-                    'shares': shares,  # Can be fractional (e.g., 0.164 shares)
-                    'cost': cost,
-                    'momentum': score
-                }
-                trades.append(trade)
-                
-                # Send webhook notification
-                webhook_data = {
-                    'action': 'BUY',
-                    'ticker': ticker,
-                    'price': fill_price,
-                    'shares': shares,
-                    'momentum': score
-                }
-                send_webhook(webhook_data)
-                
-                shares_str = f"{shares:.4f}" if shares < 1 else f"{shares:.2f}"
-                print_alert(
-                    f"BUY {ticker} @ ${fill_price:.2f}\n"
-                    f"     Momentum Score: {score:.4f}\n"
-                    f"     Shares: {shares_str}\n"
-                    f"     Cost: ${cost:,.2f}\n"
-                    f"     Stop Loss: ${positions[ticker]['stop_loss']:.2f} (-15%)\n"
-                    f"     Take Profit: ${positions[ticker]['take_profit']:.2f} (+40%)\n"
-                    f"     Capital Remaining: ${capital:,.2f}",
-                    "🟢"
-                )
+                shares = filled_shares
+                cost = shares * fill_price + COMMISSION
+                log_message(f"   🧪 Paper trade: {fill_note} at ${fill_price:.2f}")
+            else:
+                # LIVE MODE - Place actual limit order (NOT IMPLEMENTED YET)
+                log_message(f"   ⚠️ LIVE ORDER EXECUTION NOT YET IMPLEMENTED")
+                log_message(f"   Set PAPER_TRADING=True to simulate")
+                continue
+
+            capital -= cost
+
+            # Dynamic take profit based on stock price
+            take_profit_pct = HIGH_PRICE_TAKE_PROFIT_PCT if fill_price > HIGH_PRICE_THRESHOLD else TAKE_PROFIT_PCT
+
+            positions[ticker] = {
+                'shares': shares,
+                'entry_price': fill_price,
+                'entry_date': datetime.now(),
+                'entry_time': datetime.now(),
+                'highest_price': fill_price,
+                'stop_loss': fill_price * (1 - STOP_LOSS_PCT),
+                'take_profit': fill_price * (1 + take_profit_pct),
+                'trailing_stop': fill_price * (1 - TRAILING_STOP_PCT),
+                'current_price': fill_price,
+                'unrealized_pnl': 0,
+                'unrealized_pnl_pct': 0
+            }
+
+            # Save position to database
+            save_position_to_db(ticker, positions[ticker])
+
+            # Log trade to history
+            log_trade_to_db(
+                ticker=ticker,
+                action='BUY',
+                shares=shares,
+                price=fill_price,
+                capital_before=capital + cost,  # Capital before this buy
+                total_positions=len(positions),
+                notes=f"Momentum score: {score:.4f}"
+            )
+
+            trade = {
+                'time': datetime.now().strftime('%I:%M:%S %p'),
+                'action': 'BUY',
+                'ticker': ticker,
+                'price': fill_price,
+                'shares': shares,  # Can be fractional (e.g., 0.164 shares)
+                'cost': cost,
+                'momentum': score
+            }
+            trades.append(trade)
+            
+            # Send webhook notification
+            webhook_data = {
+                'action': 'BUY',
+                'ticker': ticker,
+                'price': fill_price,
+                'shares': shares,
+                'momentum': score
+            }
+            send_webhook(webhook_data)
+            
+            shares_str = f"{shares:.4f}" if shares < 1 else f"{shares:.2f}"
+            print_alert(
+                f"BUY {ticker} @ ${fill_price:.2f}\n"
+                f"     Momentum Score: {score:.4f}\n"
+                f"     Shares: {shares_str}\n"
+                f"     Cost: ${cost:,.2f}\n"
+                f"     Stop Loss: ${positions[ticker]['stop_loss']:.2f} (-{STOP_LOSS_PCT*100:.1f}%)\n"
+                f"     Take Profit: ${positions[ticker]['take_profit']:.2f} (+{take_profit_pct*100:.1f}%)\n"
+                f"     Capital Remaining: ${capital:,.2f}",
+                "🟢"
+            )
 
 # Main loop
 print_header("🔄 STARTING LIVE MONITORING")
@@ -1299,13 +1824,39 @@ try:
         now = datetime.now()
         current_time = now.strftime('%I:%M:%S %p')
         elapsed_minutes = int((now - start_time).total_seconds() / 60)
+
+        # Optional timed run (useful for controlled paper tests)
+        if MAX_RUNTIME_MINUTES and MAX_RUNTIME_MINUTES > 0 and elapsed_minutes >= MAX_RUNTIME_MINUTES:
+            log_message(f"\n⏹️  MAX_RUNTIME_MINUTES reached ({MAX_RUNTIME_MINUTES:.0f} min) - stopping")
+            break
+
+        # Market-closed guard (holiday/weekend/outside regular session): do not scan/enter.
+        market_now = get_now_eastern()
+        is_open_now, market_reason, next_open_dt = get_us_market_state(market_now)
+        if (not is_open_now) and (not Path(REMOTE_STOP_FILE).exists()):
+            breakers_status = {
+                'market_open': False,
+                'market_reason': market_reason,
+                'next_open': next_open_dt.isoformat() if next_open_dt else None,
+            }
+            publish_bot_status(last_known_prices or {}, breakers_status)
+
+            idle_seconds = int(os.getenv('MARKET_IDLE_POLL_SECONDS', '60'))
+            # Log about once per ~10 minutes (regardless of idle interval)
+            log_every = max(int(600 / max(idle_seconds, 1)), 1)
+            if checks % log_every == 0:
+                next_open_str = next_open_dt.strftime('%a %m/%d %I:%M %p ET') if next_open_dt else 'unknown'
+                log_message(f"\n⏸️  MARKET CLOSED: {market_reason} | Next open: {next_open_str} | Idling {idle_seconds}s")
+
+            time_sleep.sleep(idle_seconds)
+            continue
         
         # API Token Auto-Refresh (every 25 minutes to prevent 30-min expiry)
         minutes_since_refresh = (now - token_refresh_time).total_seconds() / 60
         if minutes_since_refresh >= TOKEN_REFRESH_INTERVAL_MINUTES:
             try:
                 log_message(f"   🔄 Refreshing Questrade API token (last refresh: {minutes_since_refresh:.1f} min ago)...")
-                questrade.refresh_token()
+                questrade.refresh_access_token()
                 token_refresh_time = now
                 log_message(f"   ✅ Token refreshed successfully")
             except Exception as e:
@@ -1321,23 +1872,17 @@ try:
             # Close all positions before stopping
             if positions:
                 log_message(f"\n📦 Closing {len(positions)} open positions...")
-                current_prices = get_current_prices_questrade(list(positions.keys()))
+                current_prices, quote_map = get_current_prices_questrade(list(positions.keys()))
                 for ticker in list(positions.keys()):
                     if ticker in current_prices:
-                        check_positions(current_prices)  # Will close positions
+                        check_positions(current_prices, quote_map)  # Will close positions
             
             # Delete the stop file
             Path(REMOTE_STOP_FILE).unlink()
             log_message(f"   ✅ Stop file removed")
             break
         
-        # Check if market is closed (after 4:00 PM EST)
-        market_close_hour = 16  # 4 PM in 24-hour format
-        if now.hour >= market_close_hour:
-            log_message(f"\n🔴 Market closed at 4:00 PM EST")
-            log_message(f"   Current time: {current_time}")
-            log_message(f"   Stopping live trading...")
-            break
+        # (Market close is handled by the market-closed guard above)
         
         log_message(f"\n{'─' * 80}")
         log_message(f"🔍 Check #{checks} at {current_time} (Elapsed: {elapsed_minutes} min)")
@@ -1350,13 +1895,16 @@ try:
         
         # Get current prices from Questrade
         log_message("   📊 Fetching live prices from Questrade...")
-        current_prices = get_current_prices_questrade(TRADING_UNIVERSE)
+        prices_from_cache = False
+        current_prices, quote_map = get_current_prices_questrade(TRADING_UNIVERSE)
         
         # Fallback to last known prices if API fails
         if not current_prices or len(current_prices) == 0:
             log_message(f"   ⚠️ API returned no prices - using last known prices")
             if last_known_prices:
                 current_prices = last_known_prices.copy()
+                quote_map = last_known_quotes.copy()
+                prices_from_cache = True
                 log_message(f"   ✓ Using {len(current_prices)} cached prices")
             else:
                 log_message(f"   ❌ No cached prices available - skipping this cycle")
@@ -1365,13 +1913,19 @@ try:
         else:
             # Update cache with successful price fetch
             last_known_prices = current_prices.copy()
+            last_known_quotes = quote_map.copy()
             log_message(f"   ✓ Got prices for {len(current_prices)} stocks")
             
             # Write prices to Redis for dashboard (in-memory cache)
             try:
-                r = redis.Redis(host='localhost', port=6379, decode_responses=True)
+                r = redis.Redis(
+                    host=os.getenv('REDIS_HOST', 'localhost'),
+                    port=int(os.getenv('REDIS_PORT', '6379')),
+                    decode_responses=True,
+                )
                 r.setex('live_prices', 60, json.dumps({
                     'timestamp': datetime.now().isoformat(),
+                    'source': 'redis',
                     'prices': current_prices
                 }))
             except Exception as e:
@@ -1380,7 +1934,7 @@ try:
         
         # Check existing positions for exits
         if positions:
-            check_positions(current_prices)
+            check_positions(current_prices, quote_map)
             # Update position P&L in database (only if shares > 0)
             for ticker, pos in positions.items():
                 if ticker in current_prices and pos['shares'] > 0:
@@ -1413,13 +1967,35 @@ try:
                 for ticker in list(positions.keys()):
                     if ticker in current_prices:
                         # Force close at market price
-                        check_positions(current_prices)
+                        check_positions(current_prices, quote_map)
             
             log_message(f"   🛑 Trading stopped to prevent further losses")
             break
         
+        # Fresh-quote requirement status (especially for exits): detect stale/missing quotes for open positions.
+        stale_position_tickers = []
+        if positions:
+            for t in positions.keys():
+                q = quote_map.get(t) if quote_map else None
+                is_stale, _age = is_quote_stale(q)
+                if is_stale:
+                    stale_position_tickers.append(t)
+
         # Scan for new opportunities (pass capital for affordability check)
-        scan_and_trade(historical_data, current_prices, capital)
+        data_feed_reason = None
+        if prices_from_cache:
+            err = last_quote_fetch_error or "Unknown quote fetch error"
+            data_feed_reason = f"Questrade returned no prices; using cached prices ({err})"
+            log_message(f"   🚫 Entries paused: {data_feed_reason} (feed degraded)")
+            trade_block_stats['entries_paused_cache_cycles'] += 1
+        elif stale_position_tickers:
+            sample = ", ".join(stale_position_tickers[:6])
+            suffix = "" if len(stale_position_tickers) <= 6 else f" +{len(stale_position_tickers) - 6} more"
+            data_feed_reason = f"Stale/missing quotes for positions: {sample}{suffix}"
+            log_message(f"   🚫 Entries paused: {data_feed_reason} (cannot safely exit positions)")
+            trade_block_stats['entries_paused_stale_positions_cycles'] += 1
+        else:
+            scan_and_trade(historical_data, current_prices, quote_map, capital)
         
         # Current status (recalculate equity after potential trades)
         current_equity = capital
@@ -1429,6 +2005,21 @@ try:
         
         pnl = current_equity - starting_equity
         pnl_pct = (pnl / starting_equity) * 100
+
+        daily_loss_usd = current_equity - daily_start_equity
+
+        breakers_status = {
+            'daily_loss_limit': daily_loss_usd <= -MAX_DAILY_LOSS_USD,
+            'consecutive_losses': consecutive_losses >= MAX_CONSECUTIVE_LOSSES,
+            'market_regime_ok': market_regime_ok,
+            'prices_from_cache': prices_from_cache,
+            'data_feed_ok': (not prices_from_cache) and (len(stale_position_tickers) == 0),
+            'data_feed_reason': data_feed_reason,
+            'stale_position_quote_count': len(stale_position_tickers),
+            'stale_position_quote_tickers': stale_position_tickers[:10],
+            'trade_block_stats': dict(trade_block_stats),
+        }
+        publish_bot_status(current_prices, breakers_status)
         
         log_message(f"\n   \ud83d\udcc8 Current Status:")
         log_message(f"      Equity: ${current_equity:,.2f}")
@@ -1459,7 +2050,7 @@ end_time = datetime.now()
 duration = (end_time - start_time).total_seconds() / 60
 
 # Get final prices and calculate final equity
-final_prices = get_current_prices_questrade(TRADING_UNIVERSE)
+final_prices, _ = get_current_prices_questrade(TRADING_UNIVERSE)
 final_equity = capital
 for ticker, pos in positions.items():
     if ticker in final_prices:
@@ -1476,8 +2067,13 @@ log_message(f"   Net P&L:          ${final_equity - starting_equity:+,.2f}")
 log_message(f"   Return:           {((final_equity - starting_equity) / starting_equity * 100):+.2f}%")
 log_message(f"   Max Drawdown:     {max_drawdown_pct:+.2f}%")
 
-# Count starting positions (loaded from DB at startup)
-starting_positions_count = len(load_positions_from_db()) if 'load_positions_from_db' in dir() else 0
+log_message(f"\n🛰️  QUOTE / FEED SAFETY (blocked counts):")
+log_message(f"   QUOTE_STALE_SECONDS: {QUOTE_STALE_SECONDS}s")
+log_message(f"   Entries paused (cached prices cycles): {trade_block_stats.get('entries_paused_cache_cycles', 0)}")
+log_message(f"   Entries paused (stale quotes in positions cycles): {trade_block_stats.get('entries_paused_stale_positions_cycles', 0)}")
+log_message(f"   Entry blocks (missing quote): {trade_block_stats.get('entry_block_missing_quote', 0)}")
+log_message(f"   Entry blocks (stale quote): {trade_block_stats.get('entry_block_stale_quote', 0)}")
+log_message(f"   Exit blocks (stale/missing quote): {trade_block_stats.get('exit_block_stale_or_missing_quote', 0)}")
 
 if trades:
     log_message(f"\n📋 TRADES EXECUTED: {len(trades)}")

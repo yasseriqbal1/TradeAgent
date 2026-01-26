@@ -10,8 +10,9 @@
 }
 
 body {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
-    "Helvetica Neue", Arial, sans-serif;
+  font-family:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue",
+    Arial, sans-serif;
   background-color: var(--light-bg);
   color: #333;
 }
@@ -22,7 +23,9 @@ body {
   border-radius: 12px;
   padding: 24px;
   box-shadow: var(--card-shadow);
-  transition: transform 0.2s, box-shadow 0.2s;
+  transition:
+    transform 0.2s,
+    box-shadow 0.2s;
   border: 1px solid rgba(0, 0, 0, 0.05);
 }
 
@@ -158,6 +161,32 @@ body {
   letter-spacing: 0.5px;
 }
 
+/* Live price source badge */
+.ticker-source {
+  margin-left: 8px;
+  padding: 2px 6px;
+  border-radius: 6px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #fff;
+  background-color: #6c757d;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+.ticker-source.is-live {
+  background-color: var(--success-color);
+}
+
+.ticker-source.is-degraded {
+  background-color: var(--warning-color);
+  color: #212529;
+}
+
+.ticker-source.is-error {
+  background-color: var(--danger-color);
+}
+
 /* Action Badges */
 .action-buy {
   background-color: rgba(25, 135, 84, 0.1);
@@ -237,6 +266,64 @@ body {
 .info-value {
   font-weight: 600;
   color: #333;
+}
+
+/* Dip Suggestions */
+.dip-suggestions-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.dip-suggestion-item {
+  border: 1px solid rgba(0, 0, 0, 0.06);
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: #fff;
+}
+
+.dip-suggestion-price {
+  font-weight: 700;
+  line-height: 1.1;
+}
+
+.dip-suggestion-score {
+  font-size: 0.8rem;
+}
+
+.dip-suggestion-reasons {
+  font-size: 0.85rem;
+}
+
+/* Critical Monitoring */
+.critical-indicators {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.critical-indicator-item {
+  border: 1px solid rgba(0, 0, 0, 0.06);
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: #fff;
+}
+
+.critical-indicator-value {
+  font-weight: 700;
+}
+
+.critical-alerts {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.critical-alert-item {
+  border: 1px solid rgba(0, 0, 0, 0.06);
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: #fff;
 }
 
 /* Empty State */
@@ -353,7 +440,9 @@ body {
   border: 1px solid rgba(0, 0, 0, 0.05);
   white-space: nowrap;
   flex-shrink: 0;
-  transition: transform 0.2s, box-shadow 0.2s;
+  transition:
+    transform 0.2s,
+    box-shadow 0.2s;
 }
 
 .ticker-item:hover {

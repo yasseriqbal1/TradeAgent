@@ -10,6 +10,8 @@
 - **Trade History**: Complete log of today's trades
 - **Bot Status**: Live indicator showing if bot is active
 - **Safety Features**: Display of all active protection systems
+- **Dip Suggestions**: Lightweight dip/reversal ideas from live prices (hidden when market is closed or live data is missing)
+- **Critical Monitoring**: Macro/context panel (VIX + WTI) plus external alerts pushed into Redis
 - **Mobile Responsive**: Works on phone, tablet, desktop
 - **Zero Interference**: Read-only mode, safe to run alongside bot
 
@@ -80,10 +82,11 @@ Then open your browser to: **http://localhost:5000**
 
 ## 🔒 Safety
 
-- **Read-only**: Only reads from database, never writes
+- **Read-only (DB)**: Only reads from database, never writes
 - **No interference**: Bot doesn't know dashboard exists
 - **Separate process**: Runs in its own terminal window
-- **No API calls**: Doesn't use Questrade API (no rate limits)
+- **No broker trading**: Doesn't place orders
+- **Limited market data calls**: Critical Monitoring fetches VIX/WTI via `yfinance` and caches results to reduce rate limits
 
 ## 🛠️ Technical Details
 
@@ -120,6 +123,43 @@ The dashboard exposes these endpoints (for advanced users):
 - `GET /api/positions` - Current open positions (JSON)
 - `GET /api/trades` - Today's trade history (JSON)
 - `GET /api/status` - Bot running status (JSON)
+- `GET /api/dip-suggestions` - Dip suggestions (JSON). Returns `enabled:false` when market is closed or live Redis prices are missing/stale.
+- `GET /api/critical-monitor` - Macro/context indicators + external alerts (JSON)
+
+## ⚙️ Config (Env Vars)
+
+Critical Monitoring:
+
+- `VIX_WARN` / `VIX_CRITICAL` (defaults: `20` / `30`)
+- `WTI_WARN` / `WTI_CRITICAL` (defaults: `65` / `80`)
+- `CRITICAL_INDICATOR_CACHE_SECONDS` (default: `300`) – caches VIX/WTI to avoid rate limits
+- `CRITICAL_FETCH_TIMEOUT_SECONDS` (default: `4`) – prevents the endpoint from hanging on slow quote responses
+
+External alerts:
+
+- Redis key: `critical_alerts_v1` (expects a JSON list of alert dicts)
+- `CRITICAL_ALERTS_MAX` (default: `8`)
+
+## 📰 Automatic News Alerts (Optional)
+
+If you want the dashboard to surface market-moving headlines without you watching TV,
+run the RSS monitor:
+
+- Script: `dashboard/news_monitor.py`
+- Starter: `dashboard/start_news_monitor.ps1`
+
+It polls RSS/Atom feeds you configure, filters for keywords/tickers, and writes alerts into Redis.
+Those alerts appear automatically under **Critical Monitoring**.
+
+Minimal setup (in your project `.env`):
+
+- `NEWS_RSS_URLS=https://www.sec.gov/rss/news/press.xml,https://www.federalreserve.gov/feeds/press_all.xml`
+- `WATCHLIST_TICKERS=NVDA,MSFT,IONQ` (optional)
+
+Tuning:
+
+- `NEWS_POLL_SECONDS` (default `60`)
+- `NEWS_MIN_SCORE` (default `3`) – higher = fewer alerts
 
 ## 🐛 Troubleshooting
 

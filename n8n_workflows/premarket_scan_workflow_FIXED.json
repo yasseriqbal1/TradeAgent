@@ -9,8 +9,7 @@
               "field": "cronExpression",
               "expression": "0 9 * * 1-5"
             }
-          ],
-          "timezone": "America/New_York"
+          ]
         }
       },
       "name": "Schedule: 9:00 AM EST (Mon-Fri)",
