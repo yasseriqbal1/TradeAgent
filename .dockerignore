@@ -1,0 +1,14 @@
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/*.pyd
+.venv/
+venv/
+.env
+logs/
+reports/
+historical_data/
+data/
+Testing/
+Documentation/
+.vscode/

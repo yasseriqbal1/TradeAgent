@@ -9,6 +9,26 @@ from datetime import datetime, timedelta
 from loguru import logger
 from dotenv import load_dotenv
 
+
+def _read_text_file(path: Path) -> Optional[str]:
+    try:
+        if not path.exists():
+            return None
+        text = path.read_text(encoding="utf-8").strip()
+        # Defensive: strip UTF-8 BOM if a file was written with BOM
+        if text.startswith("\ufeff"):
+            text = text.lstrip("\ufeff").strip()
+        return text
+    except Exception:
+        return None
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(content, encoding="utf-8")
+    tmp_path.replace(path)
+
 from .config import DATA_DIR
 
 
@@ -26,8 +46,15 @@ class QuestradeAPI:
         # Load from .env file if not provided
         if refresh_token is None:
             load_dotenv()
-            refresh_token = os.getenv("QUESTRADE_REFRESH_TOKEN")
             server_type = os.getenv("QUESTRADE_SERVER_TYPE", "practice")
+
+            # Prefer a token file when provided (best for Docker: host-mounted, writable)
+            token_file = os.getenv("QUESTRADE_REFRESH_TOKEN_FILE")
+            token_file_path = Path(token_file) if token_file else None
+            if token_file_path:
+                refresh_token = _read_text_file(token_file_path)
+            if not refresh_token:
+                refresh_token = os.getenv("QUESTRADE_REFRESH_TOKEN")
         
         if not refresh_token:
             raise ValueError(
@@ -41,7 +68,11 @@ class QuestradeAPI:
         self.access_token = None
         self.token_expiry = None
         
-        # Find .env file path for token persistence
+        # Token persistence targets (token file preferred; .env fallback)
+        token_file = os.getenv("QUESTRADE_REFRESH_TOKEN_FILE")
+        self.refresh_token_file = Path(token_file) if token_file else None
+
+        # Find .env file path for token persistence (fallback for non-Docker runs)
         self.env_path = Path.cwd() / '.env'
         if not self.env_path.exists():
             # Try parent directories
@@ -90,7 +121,7 @@ class QuestradeAPI:
             self.api_server = data["api_server"]
             new_refresh_token = data["refresh_token"]  # Questrade provides new token
             
-            # Save new refresh token to .env file for persistence
+            # Save new refresh token for persistence (file preferred, .env fallback)
             if new_refresh_token != self.refresh_token:
                 self._save_refresh_token(new_refresh_token)
                 self.refresh_token = new_refresh_token
@@ -111,8 +142,21 @@ class QuestradeAPI:
         self._authenticate()
     
     def _save_refresh_token(self, new_token: str):
-        """Save new refresh token to .env file."""
+        """Persist the rotating refresh token.
+
+        Preference order:
+        1) QUESTRADE_REFRESH_TOKEN_FILE (host-mounted file; best for Docker)
+        2) .env file (developer/local convenience)
+        """
         try:
+            if self.refresh_token_file is not None:
+                try:
+                    _atomic_write_text(self.refresh_token_file, new_token + "\n")
+                    logger.debug("✓ Refresh token updated in token file")
+                    return
+                except Exception as e:
+                    logger.warning(f"Failed to save refresh token to token file: {e}")
+
             if not self.env_path.exists():
                 logger.warning(f".env file not found at {self.env_path}, cannot persist token")
                 return

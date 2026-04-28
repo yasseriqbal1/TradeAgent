@@ -126,9 +126,9 @@ def refresh_existing_csvs(
         except Exception:
             failed.append(ticker)
 
-    print(f"\n✅ Updated: {updated}/{len(tickers)}")
+    print(f"\n[OK] Updated: {updated}/{len(tickers)}")
     if failed:
-        print(f"❌ Failed: {', '.join(failed[:12])}{'...' if len(failed) > 12 else ''}")
+        print(f"[FAIL] Failed: {', '.join(failed[:12])}{'...' if len(failed) > 12 else ''}")
 
     return updated, failed
 
@@ -167,4 +167,4 @@ if __name__ == "__main__":
     # Fast path by default for "market is about to open" scenarios.
     refresh_existing_csvs(tickers, output_dir=data_dir, years=args.years, force_full=args.full)
 
-    print("\nDone. Next: re-run the bot; the freshness check should pass.")
+    print("\nDone. Re-run the bot; the freshness check should pass.")

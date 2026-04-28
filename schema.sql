@@ -60,6 +60,34 @@ CREATE INDEX IF NOT EXISTS idx_signals_rank ON signals(rank);
 CREATE INDEX IF NOT EXISTS idx_factors_signal ON factors(signal_id);
 
 -- ============================================================================
+-- PAPER / LIVE BOT TRADE LOGGING (trades_history)
+-- ============================================================================
+
+-- Trade blotter for bot actions (supports fractional shares)
+CREATE TABLE IF NOT EXISTS trades_history (
+    id SERIAL PRIMARY KEY,
+    trade_date TIMESTAMP NOT NULL DEFAULT NOW(),
+    ticker VARCHAR(10) NOT NULL,
+    action VARCHAR(10) NOT NULL,
+    shares FLOAT NOT NULL,
+    price FLOAT NOT NULL,
+    total_value FLOAT NOT NULL,
+    exit_reason VARCHAR(50),
+    entry_price FLOAT,
+    hold_duration_minutes FLOAT,
+    pnl FLOAT,
+    pnl_pct FLOAT,
+    capital_before FLOAT,
+    capital_after FLOAT,
+    total_positions INT,
+    notes TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_trades_history_trade_date ON trades_history(trade_date DESC);
+CREATE INDEX IF NOT EXISTS idx_trades_history_ticker_date ON trades_history(ticker, trade_date DESC);
+CREATE INDEX IF NOT EXISTS idx_trades_history_action ON trades_history(action);
+
+-- ============================================================================
 -- LIVE TRADING TABLES (Phase 3A)
 -- ============================================================================
 
@@ -73,7 +101,7 @@ CREATE TABLE IF NOT EXISTS live_signals (
     price FLOAT NOT NULL,
     signal_type VARCHAR(10) NOT NULL,  -- 'buy' or 'sell'
     -- Trade plan
-    shares INT NOT NULL,
+    shares DOUBLE PRECISION NOT NULL,
     stop_loss FLOAT NOT NULL,
     take_profit FLOAT NOT NULL,
     max_hold_days INT NOT NULL,
@@ -91,15 +119,15 @@ CREATE TABLE IF NOT EXISTS orders (
     id VARCHAR(50) PRIMARY KEY,  -- UUID
     ticker VARCHAR(10) NOT NULL,
     side VARCHAR(10) NOT NULL,  -- 'buy' or 'sell'
-    quantity INT NOT NULL,
+    quantity DOUBLE PRECISION NOT NULL,
     order_type VARCHAR(20) NOT NULL,  -- 'market', 'limit', 'stop_loss', etc.
     status VARCHAR(20) NOT NULL,  -- 'pending', 'submitted', 'filled', 'cancelled', etc.
     -- Pricing
     limit_price FLOAT,
     stop_price FLOAT,
     filled_price FLOAT,
-    filled_quantity INT DEFAULT 0,
-    remaining_quantity INT,
+    filled_quantity DOUBLE PRECISION DEFAULT 0,
+    remaining_quantity DOUBLE PRECISION,
     commission FLOAT DEFAULT 0,
     -- Execution
     created_at TIMESTAMP DEFAULT NOW(),
@@ -114,7 +142,7 @@ CREATE TABLE IF NOT EXISTS orders (
 CREATE TABLE IF NOT EXISTS positions (
     id SERIAL PRIMARY KEY,
     ticker VARCHAR(10) NOT NULL UNIQUE,
-    quantity INT NOT NULL,
+    quantity DOUBLE PRECISION NOT NULL,
     entry_price FLOAT NOT NULL,
     entry_date TIMESTAMP NOT NULL DEFAULT NOW(),
     current_price FLOAT NOT NULL,
@@ -153,7 +181,7 @@ CREATE TABLE IF NOT EXISTS live_trades (
     exit_order_id VARCHAR(50),
     exit_reason VARCHAR(50) NOT NULL,  -- 'stop_loss', 'take_profit', 'max_hold', 'manual'
     -- Trade details
-    quantity INT NOT NULL,
+    quantity DOUBLE PRECISION NOT NULL,
     hold_days INT,
     -- P&L
     pnl FLOAT NOT NULL,

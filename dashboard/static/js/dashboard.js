@@ -87,9 +87,9 @@ async function updateSummary() {
     // Equity source / mode label
     const equitySourceEl = document.getElementById("equitySource");
     if (equitySourceEl) {
-      const src = data.equity_source || data.source || "—";
-      const mode = data.trading_mode ? ` • ${data.trading_mode}` : "";
-      equitySourceEl.textContent = `Source: ${src}${mode}`;
+      const equitySrc = data.equity_source || data.source || "—";
+      const cashSrc = data.cash_source || equitySrc;
+      equitySourceEl.textContent = `Source: ${equitySrc} • ${cashSrc}`;
     }
 
     // Trades Today

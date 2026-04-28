@@ -110,7 +110,6 @@ def get_summary():
     """Get today's trading summary"""
     try:
         bot_status = get_bot_status_from_redis()
-        paper_capital_source = os.getenv('PAPER_CAPITAL_SOURCE', 'db').strip().lower()
         conn = get_db_connection()
         cur = conn.cursor()
         
@@ -154,6 +153,7 @@ def get_summary():
         invested_value = 0.0
         trading_mode = None
         equity_source = None
+        cash_source = None
 
         if bot_status:
             trading_mode = bot_status.get('mode')
@@ -166,13 +166,13 @@ def get_summary():
             broker_equity = bot_status.get('broker_equity')
             broker_cash = bot_status.get('broker_cash')
 
-            # In paper mode, optionally display broker balances (for showing true account value).
-            allow_broker_in_paper = is_paper_mode and paper_capital_source in ('broker', 'broker_cash', 'broker_equity')
-
-            use_broker_equity = (allow_broker_in_paper or (not is_paper_mode)) and broker_equity is not None and float(broker_equity) > 0
-            use_broker_cash = (allow_broker_in_paper or (not is_paper_mode)) and broker_cash is not None and float(broker_cash) >= 0
+            # Dashboard display should always prefer real broker balances when available,
+            # regardless of paper capital accounting mode used by the bot.
+            use_broker_equity = broker_equity is not None and float(broker_equity) > 0
+            use_broker_cash = broker_cash is not None and float(broker_cash) >= 0
 
             equity_source = 'broker' if use_broker_equity else (bot_status.get('equity_source') or 'paper')
+            cash_source = 'broker' if use_broker_cash else (bot_status.get('cash_source') or 'paper')
 
             if is_paper_mode and (not use_broker_equity) and bot_status.get('paper_equity') is not None:
                 current_equity = float(bot_status.get('paper_equity', 0))
@@ -241,6 +241,7 @@ def get_summary():
             'source': 'redis' if bot_status else 'db',
             'trading_mode': trading_mode,
             'equity_source': equity_source,
+            'cash_source': cash_source,
             'total_trades': total_trades,
             'buys': buys,
             'sells': sells,

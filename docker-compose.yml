@@ -1,0 +1,96 @@
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+
+  postgres:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:-tradeagent}
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
+    volumes:
+      - tradeagent_postgres_data:/var/lib/postgresql/data
+      - ./schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+
+  dashboard:
+    image: ghcr.io/yasseriqbal1/tradeagent-dashboard:latest
+    build:
+      context: .
+      dockerfile: deploy/docker/dashboard.Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - redis
+      - postgres
+    env_file:
+      - .env
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DASHBOARD_PORT: 5000
+      DASHBOARD_DEBUG: "false"
+    ports:
+      - "5000:5000"
+
+  bot:
+    image: ghcr.io/yasseriqbal1/tradeagent-bot:latest
+    build:
+      context: .
+      dockerfile: deploy/docker/bot.Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - redis
+      - postgres
+    env_file:
+      - .env
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      DB_HOST: postgres
+      DB_PORT: 5432
+      QUESTRADE_REFRESH_TOKEN_FILE: /run/secrets/questrade_refresh_token.txt
+    volumes:
+      - ./secrets:/run/secrets
+
+  # Optional: n8n workflows (avoids installing Node/npm on the target machine)
+  # Enable with:
+  #   docker compose --profile n8n up -d
+  n8n:
+    image: n8nio/n8n:latest
+    restart: unless-stopped
+    ports:
+      - "5678:5678"
+    volumes:
+      - tradeagent_n8n_data:/home/node/.n8n
+    profiles: ["n8n"]
+
+  # Optional: automated RSS news -> Redis alerts (shown in dashboard)
+  # Enable by removing/commenting the `profiles` line, or run with:
+  #   docker compose --profile news up -d
+  news_monitor:
+    image: ghcr.io/yasseriqbal1/tradeagent-dashboard:latest
+    build:
+      context: .
+      dockerfile: deploy/docker/dashboard.Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - redis
+      - postgres
+    env_file:
+      - .env
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      DB_HOST: postgres
+      DB_PORT: 5432
+    command: ["python", "news_monitor.py"]
+    profiles: ["news"]
+
+volumes:
+  tradeagent_postgres_data:
+  tradeagent_n8n_data:
